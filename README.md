@@ -10,6 +10,8 @@ Copie esta pasta para `~/.claude/skills/conselho-dos-ancioes/`. Requer Node 18+,
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rev HEAD --contexto "1 frase"
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --arquivo plano.md --pedido "pedido original"
 ```
+Segurança: arquivos sensíveis (`.env`, chaves) e lockfiles ficam fora do diff; o Opus roda sem `ANTHROPIC_API_KEY` (use `--permitir-api` para cobrar por API); artefato exige `--pedido`. Código de saída: 0 ok, 5 só um ancião respondeu, 6 nenhum.
+
 Veja `SKILL.md` para todas as opções, regras e o formato da síntese. Use `--dry-run` para ver o que sairia da máquina.
 
 ## Aviso

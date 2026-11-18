@@ -8,7 +8,7 @@ description: >
   Use em "chama o conselho dos anciões", "pede uma segunda opinião", ou por conta própria após mudança
   de RISCO (auth, schema, contrato de API, segurança, LGPD, deploy). Não use em mudança trivial.
 author: Baseado na skill de Danilo Gato (@odanilogato, cpdf.ai); adaptada pelo ULTRON (ADR-012)
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Conselho dos Anciões (Opus + Argon)
@@ -22,24 +22,29 @@ Não substitui `murphy`, `dementador` nem `ecc:code-reviewer` (que enxergam o re
 - Não: ajuste trivial, texto curto de baixo risco, qualquer coisa com dado sensível (ver regras).
 
 ## Regras (ADR-012)
-1. **Dado sensível** (JMB, cliente, segredos, `.env`): **não use o Conselho**. O Argon é serviço externo. O script bloqueia `.env`, chaves e o vault JMB, e redige segredos e PII (CPF, CNPJ, e-mail), mas o filtro é por padrão de texto e não pega tudo. Em dúvida, rode `--dry-run` e leia o que sairia.
+1. **Dado sensível** (JMB, cliente, segredos, `.env`): **não use o Conselho**. O Argon é serviço externo. O script bloqueia `.env`, chaves e o vault JMB (também em diffs: o arquivo sensível sai do envio e vira aviso; em `--diff-file` o patch inteiro é recusado) e redige segredos e PII (CPF, CNPJ, e-mail), mas o filtro é por nome e por padrão de texto e não pega tudo (ex.: `.env` renomeado E reescrito quase todo vira apagar+criar e o arquivo novo passa; renomeação pura é pega). Em dúvida, rode `--dry-run` e leia o que sairia.
 2. **Avise em uma linha** o que vai e para onde (o material sai da máquina) antes de chamar por conta própria.
-3. **Chamada automática** só para mudança de risco. Nunca com API paga: o Argon usa a cota do plano Pro (agy) e o Opus usa o plano. Se `ANTHROPIC_API_KEY` existir, o `claude -p` pode cobrar por API: o script avisa.
-4. **Teto:** 24.000 caracteres (limite do Argon via agy). Acima disso, o script bloqueia: divida por arquivo.
+3. **Chamada automática** só para mudança de risco. Nunca com API paga: o Argon usa a cota do plano Pro (agy) e o Opus usa o plano. O script remove `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` do ambiente do Opus (usa o plano); só `--permitir-api` mantém a chave e cobra por API.
+4. **Teto:** 24.000 caracteres (limite do Argon via agy). Acima disso, o script bloqueia: divida por arquivo (`--max-chars` maior só com `--only opus`).
 5. Parecer é opinião, não ordem. Divergência entre os modelos **sobe para o Gabriel**.
 
 ## Como rodar
 ```
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs <entrada> [--contexto "1 frase"]
 ```
-- **Código (diff):** `--rev HEAD` (ou `a..b`), `--diff-file x.patch`, ou nada (usa `git diff HEAD`). `--repo DIR`.
+- **Código (diff):** `--rev HEAD` (ou `a..b`; `:` é proibido, `HEAD:arquivo` leria o blob e furaria o filtro), `--diff-file x.patch`, ou nada (usa `git diff HEAD`). `--repo DIR`.
 - **Artefato:** `--arquivo a.md` (repetível) e/ou `--texto "..."` + **sempre** o pedido original: `--pedido "..."`, `--criterio "..."` ou `--pedido-arquivo f.txt`.
-- **Opções:** `--only opus|argon`, `--effort low|medium|high` (Argon, padrão medium), `--claude-model id` (padrão `claude-opus-5-5`), `--timeout seg` (mín. 300), `--dry-run`.
+- **Artefato sem pedido é bloqueado** (exit 2); `--sem-pedido` força.
+- **Diff:** lockfiles e arquivos sensíveis ficam fora e aparecem como `AVISO`. Arquivos novos não rastreados ficam fora (aviso); `--incluir-novos` os inclui (até 100 KB cada).
+- **Opções:** `--permitir-api`, `--incluir-novos`, `--sem-pedido`, `--max-chars N`, `--only opus|argon`, `--effort low|medium|high` (Argon, padrão medium), `--claude-model id` (padrão `claude-opus-5-5`), `--timeout seg` (mín. 300), `--dry-run`.
+- **Código de saída:** 0 = todos responderam com veredito; 5 = só um deu parecer válido (resposta sem veredito conta como falha); 6 = nenhum; 2/3/4 = bloqueio antes de enviar (entrada, segredo, teto).
+- O material vai entre marcadores aleatórios e o ancião é instruído a tratá-lo como dado, não como ordem. Cada ponto deve citar trecho do material.
 - Os anciões rodam em pasta vazia, sem ferramentas (Opus `--tools ""`; Argon `--mode plan`) e só veem o prompt. Leva ~20 a 60 s.
 - Log só de metadados em `~/.claude/logs/conselho.jsonl` (nunca o conteúdo).
 - Fable 5.2 exige créditos de uso extras: não é o padrão. Para usar: `--claude-model claude-fable-5-2` (cobrado).
 
 ## Síntese (quem chamou escreve)
+O timeout derruba a árvore de processos do Opus (`taskkill /T /F` no Windows); o Argon usa o `runAgy` compartilhado (`ask-gemini`), ainda com `child.kill()` simples.
 Cada ancião responde com pontos `[ALTA|MÉDIA|BAIXA] local - problema e correção` e `VEREDITO: APROVA | APROVA COM RESSALVAS | REPROVA`. Depois da saída:
 1. **Concordam:** pontos dos dois. Confiança alta: corrigir.
 2. **Discordam:** pontos de um só, ou vereditos diferentes. Ler o código e decidir; se não der, subir ao Gabriel.
