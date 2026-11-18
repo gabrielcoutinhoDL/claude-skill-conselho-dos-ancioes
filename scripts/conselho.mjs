@@ -1,21 +1,27 @@
 #!/usr/bin/env node
-// Conselho dos Anciões (versão ULTRON): Opus (Claude Code, plano) + Argon (Antigravity), em paralelo.
-// Baseado na skill de Danilo Gato (@odanilogato, cpdf.ai); reescrito sem GPT/Codex. ADR-012.
+// Conselho dos Anciões: segunda opinião independente de vários modelos de IA (qualquer CLI) sobre um diff ou artefato.
+// Padrão: Opus (Claude Code, plano) + Argon (Antigravity `agy`). Outros modelos: --revisores arquivo.json.
+// Baseado na skill de Danilo Gato (@odanilogato, cpdf.ai); reescrito e adaptado por Gabriel Coutinho.
 // Uso: node conselho.mjs [--arquivo a.md ...] [--texto "..."] [--pedido "..."|--pedido-arquivo f]
 //        [--rev HEAD|a..b | --diff-file f.patch | (nada = git diff HEAD)] [--contexto "1 frase"]
-//        [--only opus|argon] [--effort low|medium|high] [--claude-model id] [--dry-run] [--repo DIR]
+//        [--revisores f.json] [--only nome] [--effort low|medium|high] [--claude-model id] [--dry-run] [--repo DIR]
 //        [--permitir-api] [--incluir-novos] [--sem-pedido]
-// Saída: 0 = todos os anciões ok; 5 = só um respondeu; 6 = nenhum respondeu; 2/3/4 = bloqueio antes de enviar.
-import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdtempSync, rmSync, appendFileSync, mkdirSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+// Saída: 0 = todos os anciões deram parecer válido; 5 = só parte; 6 = nenhum; 2/3/4 = bloqueio antes de enviar.
+import { spawnSync } from 'node:child_process';
+import { readFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, basename, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { sanitize, checkFilePath, runAgy } from '../../../scripts/ask-gemini.mjs';
+import { sanitize, checkFilePath, runCli, semVariaveis } from './lib.mjs';
 
-const MAX_CHARS = 24_000; // teto do Argon via agy (prompt inline, ~28K); vale para o prompt inteiro, envelope incluído
+export { killTree } from './lib.mjs';
+
+const MAX_CHARS = 24_000; // padrão de --max-chars; o teto real é o menor maxChars entre os anciões ativos
+const TETO_ARGON = 24_000; // agy só aceita o prompt inline (~28K, limite de linha de comando do Windows)
+const TETO_OPUS = 200_000;
 const MIN_TIMEOUT_S = 300;
+const NOME_ANCIAO = /^[A-Za-z0-9_-]{1,24}$/;
 
 export function parseArgs(argv) {
   const a = { files: [], effort: 'medium', claudeModel: process.env.CONSELHO_CLAUDE_MODEL || 'claude-opus-5-5', timeoutS: 900, repo: process.cwd(), maxChars: MAX_CHARS };
@@ -31,9 +37,10 @@ export function parseArgs(argv) {
     else if (k === '--diff-file') a.diffFile = next();
     else if (k === '--repo') a.repo = next();
     else if (k === '--only') a.only = next();
+    else if (k === '--revisores') a.revisoresArquivo = next();
     else if (k === '--effort') a.effort = next();
     else if (k === '--claude-model') a.claudeModel = next();
-    else if (k === '--max-chars') a.maxChars = Number(next());
+    else if (k === '--max-chars') { a.maxChars = Number(next()); a.maxCharsExplicito = true; }
     else if (k === '--timeout') a.timeoutS = Number(next());
     else if (k === '--dry-run') a.dryRun = true;
     else if (k === '--permitir-api') a.permitirApi = true;
@@ -41,12 +48,11 @@ export function parseArgs(argv) {
     else if (k === '--sem-pedido') a.semPedido = true;
     else throw new Error(`argumento desconhecido: ${k}`);
   }
-  if (a.only && !['opus', 'argon'].includes(a.only)) throw new Error('--only deve ser opus ou argon');
+  if (a.only && !NOME_ANCIAO.test(a.only)) throw new Error('--only inválido (use o nome de um ancião: letras, números, _ ou -)');
   if (!['low', 'medium', 'high'].includes(a.effort)) throw new Error('--effort deve ser low, medium ou high');
   if (!/^[a-z0-9][a-z0-9.-]{0,60}$/.test(a.claudeModel)) throw new Error('--claude-model inválido');
   if (a.rev && (a.rev.startsWith('-') || !/^[\w.^~@{}\/-]+$/.test(a.rev))) throw new Error('--rev inválido');
   if (!Number.isFinite(a.maxChars) || a.maxChars <= 0) throw new Error('--max-chars inválido');
-  if (a.maxChars > MAX_CHARS && a.only !== 'opus') throw new Error(`--max-chars acima do teto do Argon (${MAX_CHARS}); use --only opus para material maior`);
   if (!Number.isFinite(a.timeoutS) || a.timeoutS < MIN_TIMEOUT_S) { a.timeoutS = MIN_TIMEOUT_S; a.timeoutRaised = true; }
   return a;
 }
@@ -173,7 +179,7 @@ export function collect(a) {
     return { tipo: 'diff', material, avisos };
   }
   const bad = checkFilePath(resolve(a.repo));
-  if (bad && /JMB/.test(bad)) throw new Error(bad);
+  if (bad && !/bloqueado por nome/.test(bad)) throw new Error(bad); // pasta do repo na lista de bloqueio
 
   const topo = resolve(git(a.repo, ['rev-parse', '--show-toplevel']).trim());
   const intervalo = a.rev && a.rev.includes('..');
@@ -216,54 +222,93 @@ export function collect(a) {
   return { tipo: 'diff', material, avisos };
 }
 
-/** Encerra o processo e os filhos (no Windows, child.kill() não derruba a árvore). */
-export function killTree(child, plat = process.platform, run = spawnSync) {
-  if (!child.pid) return;
-  if (plat === 'win32') run('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-  else { try { child.kill('SIGKILL'); } catch { /* já saiu */ } }
+/** Anciões padrão: Opus (claude, plano) e Argon (agy). */
+export function revisoresPadrao(a) {
+  const modeloArgon = `gemini-4-argon-${a.effort}`;
+  return [
+    {
+      nome: 'Opus', modelo: a.claudeModel, cmd: 'claude', args: ['-p', '--model', a.claudeModel, '--tools', ''],
+      entrada: 'stdin', maxChars: TETO_OPUS,
+      removerEnv: a.permitirApi ? [] : ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
+    },
+    {
+      nome: 'Argon', modelo: modeloArgon, cmd: 'agy', args: ['--model', modeloArgon, '--mode', 'plan', '--print', '{prompt}'],
+      entrada: 'arg', maxChars: TETO_ARGON,
+      removerEnv: ['GEMINI_FREE_KEY', 'GEMINI_PAID_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+      sufixo: '\n\n(Responda diretamente, sem usar ferramentas, sem ler arquivos e sem executar comandos.)',
+      limpar: stripAgyNoise,
+    },
+  ];
 }
 
-/** Ambiente do Opus: sem chave de API (usa o plano), salvo --permitir-api. */
-export function claudeEnv(env, permitirApi) {
-  const e = { ...env };
-  if (!permitirApi) { delete e.ANTHROPIC_API_KEY; delete e.ANTHROPIC_AUTH_TOKEN; }
-  return e;
-}
-
-function runClaude(model, prompt, timeoutMs, env) {
-  const cwd = mkdtempSync(join(tmpdir(), 'conselho-opus-'));
-  return new Promise((res) => {
-    // '--tools ""' = sem ferramentas; prompt por stdin; pasta vazia.
-    const child = spawn('claude', ['-p', '--model', model, '--tools', ''], { cwd, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
-    let out = '', err = '', timedOut = false;
-    let fim = false, guarda;
-    const done = (code) => {
-      if (fim) return;
-      fim = true; clearTimeout(t); clearTimeout(guarda);
-      try { rmSync(cwd, { recursive: true, force: true }); } catch { /* arquivo ainda em uso */ }
-      res({ code, out, err, timedOut });
-    };
-    // Se o kill falhar e o 'close' nunca vier, a promessa não fica pendurada.
-    const t = setTimeout(() => { timedOut = true; killTree(child); guarda = setTimeout(() => done(124), 10_000); }, timeoutMs);
-    child.stdout.on('data', (c) => (out += c));
-    child.stderr.on('data', (c) => (err += c));
-    child.stdin.on('error', () => { /* EPIPE: o claude saiu antes de ler o prompt */ });
-    child.on('error', (e) => { err += String(e); done(127); });
-    child.on('close', done);
-    child.stdin.end(prompt);
+/**
+ * Anciões personalizados (qualquer modelo com CLI). Arquivo JSON: array (ou { "revisores": [...] }) de
+ *   { nome, cmd, args[], entrada: "stdin"|"arg", maxChars, removerEnv[], modelo }
+ * Em entrada "arg", um item de args deve ser exatamente "{prompt}". Sem shell: o prompt nunca é interpretado.
+ */
+export function carregarRevisores(arquivo) {
+  const bad = checkFilePath(arquivo);
+  if (bad) throw new Error(bad);
+  if (!existsSync(arquivo)) throw new Error(`--revisores: arquivo não existe: ${arquivo}`);
+  let j;
+  try { j = JSON.parse(readFileSync(arquivo, 'utf8')); } catch (e) { throw new Error(`--revisores: JSON inválido (${e.message})`); }
+  const lista = Array.isArray(j) ? j : j && j.revisores;
+  if (!Array.isArray(lista) || lista.length === 0) throw new Error('--revisores: esperado um array com pelo menos um ancião');
+  const vistos = new Set();
+  return lista.map((r, i) => {
+    const onde = `--revisores[${i}]`;
+    if (!r || typeof r !== 'object') throw new Error(`${onde}: objeto esperado`);
+    if (typeof r.nome !== 'string' || !NOME_ANCIAO.test(r.nome)) throw new Error(`${onde}: nome inválido (letras, números, _ ou -, até 24)`);
+    if (vistos.has(r.nome.toLowerCase())) throw new Error(`${onde}: nome repetido: ${r.nome}`);
+    vistos.add(r.nome.toLowerCase());
+    if (typeof r.cmd !== 'string' || !r.cmd.trim()) throw new Error(`${onde} (${r.nome}): cmd obrigatório`);
+    const args = r.args === undefined ? [] : r.args;
+    if (!Array.isArray(args) || args.some((x) => typeof x !== 'string')) throw new Error(`${onde} (${r.nome}): args deve ser array de strings`);
+    const entrada = r.entrada === undefined ? 'stdin' : r.entrada;
+    if (!['stdin', 'arg'].includes(entrada)) throw new Error(`${onde} (${r.nome}): entrada deve ser "stdin" ou "arg"`);
+    if (entrada === 'arg' && !args.includes('{prompt}')) throw new Error(`${onde} (${r.nome}): entrada "arg" exige "{prompt}" em args`);
+    const maxChars = r.maxChars === undefined ? MAX_CHARS : r.maxChars;
+    if (!Number.isFinite(maxChars) || maxChars <= 0) throw new Error(`${onde} (${r.nome}): maxChars inválido`);
+    const removerEnv = r.removerEnv === undefined ? [] : r.removerEnv;
+    if (!Array.isArray(removerEnv) || removerEnv.some((x) => typeof x !== 'string')) throw new Error(`${onde} (${r.nome}): removerEnv deve ser array de strings`);
+    return { nome: r.nome, modelo: typeof r.modelo === 'string' ? r.modelo : r.cmd, cmd: r.cmd, args, entrada, maxChars, removerEnv };
   });
+}
+
+/** Executa um ancião (padrão real; trocável em teste via deps.run). */
+function executar(rev, prompt, timeoutMs, env) {
+  return runCli({ cmd: rev.cmd, args: rev.args, entrada: rev.entrada, prompt: prompt + (rev.sufixo || ''), timeoutMs, env });
 }
 
 function logCall(e) {
   try { mkdirSync(join(homedir(), '.claude', 'logs'), { recursive: true }); appendFileSync(join(homedir(), '.claude', 'logs', 'conselho.jsonl'), JSON.stringify(e) + '\n'); } catch { /* opcional */ }
 }
 
-/** deps (para teste): { runClaude, runAgy, logCall }. Padrão = os reais. */
+/** deps (para teste): { run(rev, prompt, timeoutMs, env), logCall }. Padrão = os reais. */
 export async function main(argv, env = process.env, deps = {}) {
-  const { runClaude: rc = runClaude, runAgy: ra = runAgy, logCall: lg = logCall } = deps;
+  const { run = executar, logCall: lg = logCall } = deps;
   let a;
   try { a = parseArgs(argv); } catch (e) { console.error(`erro: ${e.message}`); return 2; }
   if (a.timeoutRaised) console.error(`AVISO: --timeout abaixo do mínimo; usando ${MIN_TIMEOUT_S} s.`);
+
+  let revisores;
+  try {
+    const arq = a.revisoresArquivo || env.CONSELHO_REVISORES;
+    revisores = arq ? carregarRevisores(arq) : revisoresPadrao(a);
+    if (a.only) {
+      revisores = revisores.filter((r) => r.nome.toLowerCase() === a.only.toLowerCase());
+      if (!revisores.length) throw new Error(`--only ${a.only}: ancião inexistente`);
+    }
+  } catch (e) { console.error(`erro: ${e.message}`); return 2; }
+  const teto = Math.min(...revisores.map((r) => r.maxChars));
+  if (a.maxCharsExplicito && a.maxChars > teto) {
+    const limitante = revisores.find((r) => r.maxChars === teto).nome;
+    console.error(`erro: --max-chars ${a.maxChars} acima do teto de ${teto} (limite de ${limitante}); use --only para um ancião com teto maior`);
+    return 2;
+  }
+  const limite = Math.min(a.maxChars, teto);
+  const nomes = revisores.map((r) => r.nome);
+
   let input;
   try {
     if (a.pedidoArquivo) { const bad = checkFilePath(a.pedidoArquivo); if (bad) throw new Error(bad); a.pedido = readFileSync(a.pedidoArquivo, 'utf8'); }
@@ -272,29 +317,32 @@ export async function main(argv, env = process.env, deps = {}) {
   for (const av of input.avisos || []) console.error(`AVISO: ${av}`);
   if (!input.material.trim()) { console.error('erro: material vazio (nada mudou?)'); return 2; }
   if (input.tipo === 'artefato' && !a.pedido && !a.semPedido) {
-    console.error('erro: artefato exige --pedido/--criterio/--pedido-arquivo (sem o pedido original os dois modelos gastam cota julgando às cegas). Use --sem-pedido para forçar.');
+    console.error('erro: artefato exige --pedido/--criterio/--pedido-arquivo (sem o pedido original os modelos gastam cota julgando às cegas). Use --sem-pedido para forçar.');
     return 2;
   }
 
-  const ownKeys = [env.GEMINI_FREE_KEY, env.GEMINI_PAID_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN, env.OPENAI_API_KEY];
+  const nomesChaves = new Set(['GEMINI_FREE_KEY', 'GEMINI_PAID_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', ...revisores.flatMap((r) => r.removerEnv)]);
+  const ownKeys = [...nomesChaves].map((n) => env[n]);
   const raw = buildPrompt({ ...input, contexto: a.contexto, pedido: a.pedido });
   const s = sanitize(raw, ownKeys);
   if (s.fatal) { console.error(`bloqueado: material de chave detectado ${JSON.stringify(s.counts)}. Nada foi enviado.`); return 3; }
   if (s.redactions > 0) console.error(`[conselho] ${s.redactions} item(ns) sensível(is) redigido(s): ${JSON.stringify(s.counts)}`);
-  if (s.text.length > a.maxChars) { console.error(`bloqueado: material com ${s.text.length} caracteres > teto ${a.maxChars} (limite do Argon). Divida por arquivo.`); return 4; }
-  console.error(`[conselho] tipo=${input.tipo} chars=${s.text.length} anciões=${a.only || 'opus+argon'}`);
-  if ((env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN) && a.only !== 'argon') {
-    console.error(a.permitirApi
-      ? 'AVISO: a chave/token da Anthropic será usada pelo Opus (--permitir-api): pode cobrar pela API.'
-      : 'ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN removidas do ambiente do Opus (usa o plano). Use --permitir-api para cobrar pela API.');
+  if (s.text.length > limite) { console.error(`bloqueado: material com ${s.text.length} caracteres > teto ${limite}. Divida por arquivo.`); return 4; }
+  console.error(`[conselho] tipo=${input.tipo} chars=${s.text.length} anciões=${nomes.join('+')}`);
+  for (const r of revisores) {
+    const tiradas = r.removerEnv.filter((n) => env[n]);
+    if (tiradas.length) console.error(`${tiradas.join(', ')} removida(s) do ambiente do ${r.nome}${r.cmd === 'claude' ? ' (usa o plano). Use --permitir-api para cobrar pela API' : ''}.`);
+  }
+  if (a.permitirApi && (env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN) && revisores.some((r) => r.cmd === 'claude')) {
+    console.error('AVISO: a chave/token da Anthropic será usada pelo Opus (--permitir-api): pode cobrar pela API.');
   }
   if (a.dryRun) { process.stdout.write(s.text + '\n'); return 0; }
 
   const t0 = Date.now();
-  const tasks = [];
-  if (a.only !== 'argon') tasks.push(['Opus', a.claudeModel, rc(a.claudeModel, s.text, a.timeoutS * 1000, claudeEnv(env, a.permitirApi))]);
-  if (a.only !== 'opus') tasks.push(['Argon', `gemini-4-argon-${a.effort}`, ra('gemini-4-argon', a.effort, s.text, a.timeoutS * 1000).then((r) => ({ ...r, out: stripAgyNoise(r.out) }))]);
-  const results = await Promise.all(tasks.map(async ([nome, modelo, p]) => ({ nome, modelo, ...(await p) })));
+  const results = await Promise.all(revisores.map(async (rev) => {
+    const r = await run(rev, s.text, a.timeoutS * 1000, semVariaveis(env, rev.removerEnv));
+    return { nome: rev.nome, modelo: rev.modelo, ...r, out: rev.limpar ? rev.limpar(r.out) : r.out };
+  }));
 
   const verdicts = {};
   let okCount = 0;
@@ -309,10 +357,10 @@ export async function main(argv, env = process.env, deps = {}) {
   }
   console.log('===== PARA A SÍNTESE =====');
   for (const [n, v] of Object.entries(verdicts)) console.log(`${n} -> ${v ? `VEREDITO: ${v}` : '(sem veredito)'}`);
-  const vs = Object.values(verdicts);
-  if (results.length === 2) {
-    if (vs.length < 2 || vs.some((v) => !v)) console.log('Um dos anciões falhou ou não deu veredito: trate como parecer de um ancião só.');
-    else console.log(vs[0] === vs[1] ? 'Vereditos IGUAIS.' : 'Vereditos DIFERENTES: olhe com mais atenção os pontos em que divergem (sobe para o Gabriel).');
+  if (results.length >= 2) {
+    const vs = Object.values(verdicts);
+    if (okCount < results.length) console.log('Um ou mais anciões falharam ou não deram veredito: trate como parecer parcial.');
+    else console.log(new Set(vs).size === 1 ? 'Vereditos IGUAIS.' : 'Vereditos DIFERENTES: olhe com mais atenção os pontos em que divergem.');
   }
   console.error(`[conselho] ${Math.round((Date.now() - t0) / 1000)} s`);
   if (okCount === 0) return 6;

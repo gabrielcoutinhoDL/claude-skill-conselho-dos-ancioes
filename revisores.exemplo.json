@@ -1,0 +1,36 @@
+[
+  {
+    "nome": "opus",
+    "modelo": "claude-opus-5-5",
+    "cmd": "claude",
+    "args": ["-p", "--model", "claude-opus-5-5", "--tools", ""],
+    "entrada": "stdin",
+    "maxChars": 200000,
+    "removerEnv": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+  },
+  {
+    "nome": "gemini",
+    "modelo": "gemini (exemplo, nao testado)",
+    "cmd": "gemini",
+    "args": ["-p", "{prompt}"],
+    "entrada": "arg",
+    "maxChars": 24000
+  },
+  {
+    "nome": "codex",
+    "modelo": "codex (exemplo, nao testado)",
+    "cmd": "codex",
+    "args": ["exec", "--sandbox", "read-only", "-"],
+    "entrada": "stdin",
+    "maxChars": 100000,
+    "removerEnv": ["OPENAI_API_KEY"]
+  },
+  {
+    "nome": "local",
+    "modelo": "ollama llama3 (exemplo, nao testado)",
+    "cmd": "ollama",
+    "args": ["run", "llama3"],
+    "entrada": "stdin",
+    "maxChars": 24000
+  }
+]

@@ -4,7 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs, buildPrompt, extractVerdict, stripAgyNoise, main, collect, checarPatch, killTree, claudeEnv, gruposDeNomes } from './conselho.mjs';
+import { parseArgs, buildPrompt, extractVerdict, stripAgyNoise, main, collect, checarPatch, killTree, gruposDeNomes, revisoresPadrao, carregarRevisores } from './conselho.mjs';
+import { sanitize, checkFilePath, carregarCaminhosBloqueados, semVariaveis, runCli } from './lib.mjs';
 
 test('gruposDeNomes: M/A/D têm 1 nome; R/C têm 2 (antigo e novo)', () => {
   assert.deepEqual(gruposDeNomes(['M', 'a.js', 'R100', '.env', 'x.txt', 'D', 'b.js', 'C75', 'o', 'c', 'A', 'n.js']),
@@ -29,7 +30,7 @@ test('parseArgs: defaults e validações', () => {
   const a = parseArgs(['--texto', 'x']);
   assert.equal(a.claudeModel, 'claude-opus-5-5'); assert.equal(a.effort, 'medium'); assert.equal(a.maxChars, 24000);
   assert.equal(parseArgs(['--timeout', '5']).timeoutS, 300);
-  assert.throws(() => parseArgs(['--only', 'gpt']));
+  assert.throws(() => parseArgs(['--only', 'a b; calc']));
   assert.throws(() => parseArgs(['--rev', '--output=x']));
   assert.throws(() => parseArgs(['--claude-model', 'a; calc']));
   assert.throws(() => parseArgs(['--foo']));
@@ -38,9 +39,9 @@ test('parseArgs: defaults e validações', () => {
 test('parseArgs: novas flags, teto do Argon e aviso de timeout', () => {
   const a = parseArgs(['--permitir-api', '--incluir-novos', '--sem-pedido']);
   assert.ok(a.permitirApi && a.incluirNovos && a.semPedido);
-  assert.throws(() => parseArgs(['--max-chars', '50000']), /teto do Argon/);
-  assert.throws(() => parseArgs(['--max-chars', '50000', '--only', 'argon']), /teto do Argon/);
-  assert.equal(parseArgs(['--max-chars', '50000', '--only', 'opus']).maxChars, 50000);
+  assert.equal(parseArgs(['--max-chars', '50000']).maxCharsExplicito, true);
+  assert.equal(parseArgs(['--texto', 'x']).maxCharsExplicito, undefined);
+  assert.equal(parseArgs(['--revisores', 'r.json']).revisoresArquivo, 'r.json');
   assert.equal(parseArgs(['--timeout', '5']).timeoutRaised, true);
   assert.equal(parseArgs(['--timeout', '600']).timeoutRaised, undefined);
 });
@@ -84,11 +85,16 @@ test('killTree: taskkill /T /F no Windows, SIGKILL no resto, nada sem pid', () =
   killTree({}, 'win32', () => assert.fail('sem pid não faz nada'));
 });
 
-test('claudeEnv: remove chave de API salvo --permitir-api', () => {
+test('semVariaveis e revisoresPadrao: Opus perde a chave de API salvo --permitir-api', () => {
   const env = { ANTHROPIC_API_KEY: 'k', ANTHROPIC_AUTH_TOKEN: 't', PATH: 'p' };
-  assert.deepEqual(claudeEnv(env, false), { PATH: 'p' });
-  assert.equal(claudeEnv(env, true).ANTHROPIC_API_KEY, 'k');
+  const a = parseArgs([]);
+  const opus = revisoresPadrao(a).find((r) => r.nome === 'Opus');
+  assert.deepEqual(semVariaveis(env, opus.removerEnv), { PATH: 'p' });
+  const opusApi = revisoresPadrao(parseArgs(['--permitir-api'])).find((r) => r.nome === 'Opus');
+  assert.equal(semVariaveis(env, opusApi.removerEnv).ANTHROPIC_API_KEY, 'k');
   assert.equal(env.ANTHROPIC_API_KEY, 'k'); // não muta o original
+  const argon = revisoresPadrao(a).find((r) => r.nome === 'Argon');
+  assert.equal(argon.entrada, 'arg'); assert.ok(argon.args.includes('{prompt}')); assert.equal(argon.maxChars, 24000);
 });
 
 test('checarPatch: bloqueia patch que toca arquivo sensível', () => {
@@ -178,8 +184,10 @@ test('main: avisa quando --timeout sobe para o mínimo', async () => {
 function fakes({ opus, argon }) {
   const visto = {};
   const deps = {
-    runClaude: async (model, prompt, ms, env) => { visto.env = env; visto.prompt = prompt; return opus; },
-    runAgy: async () => argon,
+    run: async (rev, prompt, ms, env) => {
+      if (rev.nome === 'Opus') { visto.env = env; visto.prompt = prompt; return opus; }
+      return argon;
+    },
     logCall: (e) => { (visto.logs ||= []).push(e); },
   };
   return { deps, visto };
@@ -205,7 +213,7 @@ test('main: código de saída 0 (ambos), 5 (só um), 6 (nenhum) e síntese', asy
 
   f = fakes({ opus: OK('APROVA'), argon: FALHA });
   c = await capturar(() => main(ARGS, {}, f.deps));
-  assert.equal(c.r, 5); assert.match(c.out, /FALHOU: código 1/); assert.match(c.out, /parecer de um ancião só/);
+  assert.equal(c.r, 5); assert.match(c.out, /FALHOU: código 1/); assert.match(c.out, /parecer parcial/);
 
   f = fakes({ opus: TIMEOUT, argon: OK('APROVA') });
   c = await capturar(() => main(ARGS, {}, f.deps));
@@ -226,7 +234,7 @@ test('main: ANTHROPIC_API_KEY não chega ao Opus, salvo --permitir-api', async (
   const env = { ANTHROPIC_API_KEY: 'sk-ant-fake-123', PATH: 'p' };
   let f = fakes({ opus: OK('APROVA'), argon: OK('APROVA') });
   let c = await capturar(() => main(ARGS, env, f.deps));
-  assert.equal(f.visto.env.ANTHROPIC_API_KEY, undefined); assert.match(c.err, /removidas do ambiente do Opus/);
+  assert.equal(f.visto.env.ANTHROPIC_API_KEY, undefined); assert.match(c.err, /removida\(s\) do ambiente do Opus/);
   assert.equal(f.visto.env.PATH, 'p');
 
   f = fakes({ opus: OK('APROVA'), argon: OK('APROVA') });
@@ -295,7 +303,7 @@ test('main: resposta sem veredito não conta como parecer válido (exit 5 ou 6)'
   const SEM = { code: 0, out: '1. [ALTA] x - y (cortou antes do veredito)', err: '', timedOut: false };
   let f = fakes({ opus: OK('APROVA'), argon: SEM });
   let c = await capturar(() => main(ARGS, {}, f.deps));
-  assert.equal(c.r, 5); assert.match(c.out, /Argon -> \(sem veredito\)/); assert.match(c.out, /parecer de um ancião só/);
+  assert.equal(c.r, 5); assert.match(c.out, /Argon -> \(sem veredito\)/); assert.match(c.out, /parecer parcial/);
   f = fakes({ opus: SEM, argon: SEM });
   assert.equal((await capturar(() => main(ARGS, {}, f.deps))).r, 6);
   f = fakes({ opus: SEM, argon: OK('APROVA') });
@@ -307,7 +315,7 @@ test('main: ANTHROPIC_AUTH_TOKEN também é removido do Opus e redigido da saíd
   const f = fakes({ opus: { ...OK('APROVA'), out: 'vazou tok-secreto-abcdef123456\nVEREDITO: APROVA' }, argon: OK('APROVA') });
   const c = await capturar(() => main(ARGS, env, f.deps));
   assert.equal(f.visto.env.ANTHROPIC_AUTH_TOKEN, undefined);
-  assert.match(c.err, /removidas do ambiente do Opus/);
+  assert.match(c.err, /removida\(s\) do ambiente do Opus/);
   assert.ok(!c.out.includes('tok-secreto-abcdef123456'), 'token redigido na saída');
 });
 
