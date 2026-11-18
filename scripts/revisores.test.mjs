@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { main, carregarRevisores } from './conselho.mjs';
-import { sanitize, checkFilePath, carregarCaminhosBloqueados, semVariaveis, runCli, killTree } from './lib.mjs';
+import { main, carregarRevisores, envDoAnciao } from './conselho.mjs';
+import { sanitize, checkFilePath, carregarCaminhosBloqueados, semVariaveis, runCli, killTree, resolverComando } from './lib.mjs';
 
 async function capturar(fn) {
   const so = process.stdout.write.bind(process.stdout), se = process.stderr.write.bind(process.stderr);
@@ -83,7 +83,7 @@ test('carregarRevisores: aceita config válida (array ou {revisores}) e aplica p
   const { f, limpar } = config([{ nome: 'gpt', cmd: 'codex', args: ['exec', '-'] }]);
   try {
     const r = carregarRevisores(f);
-    assert.deepEqual(r, [{ nome: 'gpt', modelo: 'codex', cmd: 'codex', args: ['exec', '-'], entrada: 'stdin', maxChars: 24000, removerEnv: [] }]);
+    assert.deepEqual(r, [{ nome: 'gpt', modelo: 'codex', cmd: 'codex', args: ['exec', '-'], entrada: 'stdin', maxChars: 24000, removerEnv: [], definirEnv: {} }]);
   } finally { limpar(); }
   const c2 = config({ revisores: [{ nome: 'local', cmd: 'ollama', args: ['run', 'llama3', '{prompt}'], entrada: 'arg', maxChars: 8000, removerEnv: ['X_KEY'], modelo: 'llama3' }] });
   try {

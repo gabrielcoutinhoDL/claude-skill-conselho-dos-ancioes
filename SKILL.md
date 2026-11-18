@@ -9,7 +9,7 @@ description: >
   Use em "chama o conselho dos anciões", "pede uma segunda opinião", ou por conta própria após mudança
   de RISCO (auth, schema, contrato de API, segurança, LGPD, deploy). Não use em mudança trivial.
 author: Baseado na skill de Danilo Gato (@odanilogato, cpdf.ai); adaptada pelo ULTRON (ADR-012)
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Conselho dos Anciões (Opus + Argon, ou os modelos que você configurar)
@@ -53,9 +53,10 @@ node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs <entrada> [--con
 ]
 ```
 - `entrada: "stdin"`: o prompt vai pelo stdin. `entrada: "arg"`: um item de `args` deve ser exatamente `{prompt}` (o Windows limita a linha de comando a ~32K: use `maxChars` ≤ 24000).
-- `removerEnv`: variáveis que o ancião **não** recebe (chaves de outros serviços, para não cobrar API paga por engano). Os valores também são redigidos da saída.
+- `removerEnv`: variáveis que o ancião **não** recebe (chaves de outros serviços, para não cobrar API paga por engano). `definirEnv`: `{ "VAR_DO_ANCIAO": "VAR_DO_SEU_AMBIENTE" }` copia o valor de outra variável (só nomes, nunca valores no JSON; ex.: `GEMINI_API_KEY` a partir de `GEMINI_FREE_KEY`). Os valores também são redigidos da saída.
+- **Windows:** CLIs do npm (gemini, codex) são shims `.cmd`; o script os acha com `where` e roda via `cmd.exe`, mas só com `entrada: "stdin"` e argumentos sem `& | < > ^ % "` (o prompt nunca vai na linha de comando).
 - O CLI precisa responder só com texto, sem ferramentas, e terminar com `VEREDITO: APROVA | APROVA COM RESSALVAS | REPROVA`. Resposta sem veredito conta como falha.
-- `--only nome` roda um ancião da lista (sem diferenciar maiúsculas). `revisores.exemplo.json` traz modelos de partida (**não testados**: confira os argumentos no `--help` do seu CLI).
+- `--only nome` roda um ancião da lista (sem diferenciar maiúsculas). `revisores.exemplo.json` traz modelos de partida. **Testados:** Claude (`claude -p`) e Gemini CLI (`gemini -m gemini-4-hydrogen`, chave free, ~106 s). **Não testados:** Codex e Ollama (confira os argumentos no `--help` do seu CLI).
 - Lista de bloqueio própria (pastas de clientes etc.): variável `CONSELHO_CAMINHOS_BLOQUEADOS` (regexes separadas por `;`) ou `~/.claude/conselho.bloqueios.json` (array de regexes). Aqui já bloqueia o vault e o perfil da JMB.
 
 ## Síntese (quem chamou escreve)

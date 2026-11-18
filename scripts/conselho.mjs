@@ -271,8 +271,21 @@ export function carregarRevisores(arquivo) {
     if (!Number.isFinite(maxChars) || maxChars <= 0) throw new Error(`${onde} (${r.nome}): maxChars inválido`);
     const removerEnv = r.removerEnv === undefined ? [] : r.removerEnv;
     if (!Array.isArray(removerEnv) || removerEnv.some((x) => typeof x !== 'string')) throw new Error(`${onde} (${r.nome}): removerEnv deve ser array de strings`);
-    return { nome: r.nome, modelo: typeof r.modelo === 'string' ? r.modelo : r.cmd, cmd: r.cmd, args, entrada, maxChars, removerEnv };
+    const definirEnv = r.definirEnv === undefined ? {} : r.definirEnv;
+    const NOME_VAR = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+    if (!definirEnv || typeof definirEnv !== 'object' || Array.isArray(definirEnv)
+      || Object.entries(definirEnv).some(([d, o]) => !NOME_VAR.test(d) || typeof o !== 'string' || !NOME_VAR.test(o))) {
+      throw new Error(`${onde} (${r.nome}): definirEnv deve ser { "VARIAVEL_DO_ANCIAO": "VARIAVEL_DO_SEU_AMBIENTE" } (só nomes, nunca valores)`);
+    }
+    return { nome: r.nome, modelo: typeof r.modelo === 'string' ? r.modelo : r.cmd, cmd: r.cmd, args, entrada, maxChars, removerEnv, definirEnv };
   });
+}
+
+/** Ambiente do ancião: sem as variáveis de `removerEnv` e com `definirEnv` copiando de OUTRA variável do seu ambiente. */
+export function envDoAnciao(env, rev) {
+  const e = semVariaveis(env, rev.removerEnv || []);
+  for (const [destino, origem] of Object.entries(rev.definirEnv || {})) if (env[origem]) e[destino] = env[origem];
+  return e;
 }
 
 /** Executa um ancião (padrão real; trocável em teste via deps.run). */
@@ -322,7 +335,12 @@ export async function main(argv, env = process.env, deps = {}) {
   }
 
   const nomesChaves = new Set(['GEMINI_FREE_KEY', 'GEMINI_PAID_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', ...revisores.flatMap((r) => r.removerEnv)]);
-  const ownKeys = [...nomesChaves].map((n) => env[n]);
+  const ownKeys = [...nomesChaves, ...revisores.flatMap((r) => Object.values(r.definirEnv || {}))].map((n) => env[n]);
+  for (const r of revisores) {
+    for (const [destino, origem] of Object.entries(r.definirEnv || {})) {
+      if (!env[origem]) console.error(`AVISO: ${r.nome} espera ${destino} a partir de ${origem}, mas ${origem} não está definida.`);
+    }
+  }
   const raw = buildPrompt({ ...input, contexto: a.contexto, pedido: a.pedido });
   const s = sanitize(raw, ownKeys);
   if (s.fatal) { console.error(`bloqueado: material de chave detectado ${JSON.stringify(s.counts)}. Nada foi enviado.`); return 3; }
@@ -340,7 +358,7 @@ export async function main(argv, env = process.env, deps = {}) {
 
   const t0 = Date.now();
   const results = await Promise.all(revisores.map(async (rev) => {
-    const r = await run(rev, s.text, a.timeoutS * 1000, semVariaveis(env, rev.removerEnv));
+    const r = await run(rev, s.text, a.timeoutS * 1000, envDoAnciao(env, rev));
     return { nome: rev.nome, modelo: rev.modelo, ...r, out: rev.limpar ? rev.limpar(r.out) : r.out };
   }));
 

@@ -99,14 +99,35 @@ export function semVariaveis(env, nomes = []) {
 }
 
 /**
- * Roda um CLI de IA sem shell, em pasta temporária vazia.
+ * No Windows, CLIs instalados pelo npm (ex.: gemini, codex) são shims .cmd, que o spawn sem shell não acha (ENOENT).
+ * Devolve { file, shim }: .exe/.com direto; .cmd/.bat marcados como shim (rodam via cmd.exe com argumentos restritos).
+ */
+export function resolverComando(cmd, plat = process.platform, run = spawnSync) {
+  if (plat !== 'win32') return { file: cmd, shim: false };
+  if (/\.(cmd|bat)$/i.test(cmd)) return { file: cmd, shim: true };
+  if (/\.(exe|com)$/i.test(cmd)) return { file: cmd, shim: false };
+  const r = run('where', [cmd], { encoding: 'utf8' });
+  const achados = r.status === 0 ? String(r.stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [];
+  const exe = achados.find((f) => /\.(exe|com)$/i.test(f));
+  if (exe) return { file: exe, shim: false };
+  const shim = achados.find((f) => /\.(cmd|bat)$/i.test(f));
+  return shim ? { file: shim, shim: true } : { file: cmd, shim: false };
+}
+
+// Em shim .cmd o comando passa pelo cmd.exe: só caracteres inofensivos nos argumentos (o prompt nunca vai na linha de comando).
+const ARG_SHIM = /^[\w@.:=,+\/\\ -]*$/;
+const aspas = (x) => (/[ ]/.test(x) ? `"${x}"` : x);
+
+/**
+ * Roda um CLI de IA em pasta temporária vazia (sem shell, salvo shim .cmd do Windows com entrada stdin).
  *  - entrada 'stdin': o prompt vai pelo stdin.
  *  - entrada 'arg': o marcador "{prompt}" em args é trocado pelo prompt (limite de linha de comando do SO).
  * Resolve sempre { code, out, err, timedOut }; nunca rejeita. Se o kill falhar, desiste em 10 s (code 124).
  */
-export function runCli({ cmd, args = [], entrada = 'stdin', prompt, timeoutMs, env = process.env }) {
+export function runCli({ cmd, args = [], entrada = 'stdin', prompt, timeoutMs, env = process.env, plat = process.platform, run = spawnSync }) {
   const cwd = mkdtempSync(join(tmpdir(), 'conselho-'));
   const argv = entrada === 'arg' ? args.map((x) => (x === '{prompt}' ? prompt : x)) : args;
+  const { file, shim } = resolverComando(cmd, plat, run);
   return new Promise((res) => {
     let child;
     let out = '', err = '', timedOut = false, fim = false, guarda;
@@ -117,8 +138,14 @@ export function runCli({ cmd, args = [], entrada = 'stdin', prompt, timeoutMs, e
       res({ code, out, err, timedOut });
     };
     const t = setTimeout(() => { timedOut = true; if (child) killTree(child); guarda = setTimeout(() => done(124), 10_000); }, timeoutMs);
+    if (shim && (entrada !== 'stdin' || argv.some((x) => !ARG_SHIM.test(x)))) {
+      err = `${cmd} é um shim .cmd do Windows: use entrada "stdin" e argumentos só com letras, números e . : = , + / \\ - (sem aspas, &, |, <, >, ^, %)`;
+      return done(127);
+    }
     try {
-      child = spawn(cmd, argv, { cwd, env, shell: false, stdio: [entrada === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      child = shim
+        ? spawn(`"${file}" ${argv.map(aspas).join(' ')}`, { cwd, env, shell: true, stdio: ['pipe', 'pipe', 'pipe'] })
+        : spawn(file, argv, { cwd, env, shell: false, stdio: [entrada === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
     } catch (e) { err = String(e); return done(127); }
     child.stdout.on('data', (c) => (out += c));
     child.stderr.on('data', (c) => (err += c));

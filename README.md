@@ -22,7 +22,7 @@ node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --arquivo plano.
   { "nome": "beta", "cmd": "outro-cli", "args": ["--print", "{prompt}"], "entrada": "arg", "maxChars": 24000 }
 ]
 ```
-`revisores.exemplo.json` traz pontos de partida (Claude, Gemini CLI, Codex, Ollama; os três últimos **não testados**, confira os argumentos no `--help` do seu CLI). O CLI deve responder só com texto, sem ferramentas, terminando com `VEREDITO: APROVA | APROVA COM RESSALVAS | REPROVA`.
+`revisores.exemplo.json` traz pontos de partida (Claude e Gemini CLI **testados**; Codex e Ollama **não testados**, confira os argumentos no `--help` do seu CLI). `definirEnv` copia uma variável do seu ambiente para outra do ancião (ex.: `GEMINI_API_KEY` a partir de `GEMINI_FREE_KEY`; só nomes, nunca valores). No Windows, CLIs do npm (shim `.cmd`) funcionam com `entrada: "stdin"`. O CLI deve responder só com texto, sem ferramentas, terminando com `VEREDITO: APROVA | APROVA COM RESSALVAS | REPROVA`.
 
 ## Segurança
 - Arquivos sensíveis (`.env`, chaves) e lockfiles ficam fora do diff; patch com arquivo sensível é recusado.

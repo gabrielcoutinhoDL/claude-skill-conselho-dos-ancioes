@@ -10,11 +10,13 @@
   },
   {
     "nome": "gemini",
-    "modelo": "gemini (exemplo, nao testado)",
+    "modelo": "gemini-4-hydrogen",
     "cmd": "gemini",
-    "args": ["-p", "{prompt}"],
-    "entrada": "arg",
-    "maxChars": 24000
+    "args": ["-m", "gemini-4-hydrogen", "--skip-trust", "--approval-mode", "plan", "-p", "Responda ao conteudo recebido por stdin."],
+    "entrada": "stdin",
+    "maxChars": 100000,
+    "removerEnv": ["GEMINI_FREE_KEY", "GEMINI_PAID_KEY", "GOOGLE_API_KEY"],
+    "definirEnv": { "GEMINI_API_KEY": "GEMINI_FREE_KEY" }
   },
   {
     "nome": "codex",
