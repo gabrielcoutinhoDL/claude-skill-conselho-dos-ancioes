@@ -1,7 +1,8 @@
 [
   {
-    "nome": "opus",
+    "nome": "jedy-opus",
     "modelo": "claude-opus-5-5",
+    "lente": "ordem",
     "cmd": "claude",
     "args": ["-p", "--model", "claude-opus-5-5", "--tools", ""],
     "entrada": "stdin",
@@ -9,8 +10,9 @@
     "removerEnv": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
   },
   {
-    "nome": "gemini",
+    "nome": "sith-gemini",
     "modelo": "gemini-4-hydrogen",
+    "lente": "ruptura",
     "cmd": "gemini",
     "args": ["-m", "gemini-4-hydrogen", "--skip-trust", "--approval-mode", "plan", "-p", "Responda ao conteudo recebido por stdin."],
     "entrada": "stdin",
@@ -21,6 +23,7 @@
   {
     "nome": "codex",
     "modelo": "codex (exemplo, nao testado)",
+    "lente": "ruptura",
     "cmd": "codex",
     "args": ["exec", "--sandbox", "read-only", "-"],
     "entrada": "stdin",
@@ -30,6 +33,7 @@
   {
     "nome": "local",
     "modelo": "ollama llama3 (exemplo, nao testado)",
+    "lente": "ordem",
     "cmd": "ollama",
     "args": ["run", "llama3"],
     "entrada": "stdin",

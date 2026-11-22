@@ -1,43 +1,99 @@
-# Conselho dos Anciões (skill para Claude Code)
+# Conselho dos Anciões v2.0 — 2 Agentes Rivais (`Jedy` ⚔️ `Sith`) & Revisão Multi-Modelo
 
-Segunda opinião independente de dois ou mais modelos de IA de famílias diferentes sobre um trabalho já feito: diff de código ou qualquer artefato (proposta, plano, decisão), conferido contra o pedido original. Cada ancião devolve pontos com gravidade e um veredito; o valor está onde eles **discordam**.
+Segunda opinião adversarial e debate estratégico para **Claude Code**, **OpenBot** e arquiteturas multiagente.
 
-Padrão: Opus (pelo plano do Claude Code) + Gemini Argon (pelo Antigravity `agy`). **Qualquer outro modelo com CLI** entra por um arquivo de configuração (`--revisores`).
+Na **v2.0.0**, o Conselho dos Anciões traz a arquitetura de **2 Agentes Rivais entre si (`Jedy` vs. `Sith`)**: em vez de deixar o agente orquestrador (ou o próprio autor do plano) presidir a revisão e sofrer de viés de confirmação, você instancia **duas frentes diametralmente opostas** que assumem o controle do Conselho e debatem qualquer plano, arquitetura, escopo ou diff de código — apoiadas pelo motor CLI multi-modelo (`scripts/conselho.mjs --rival`) que confronta **Claude Opus** + **Gemini Argon** (ou qualquer CLI configurado em `--revisores`).
 
-## Instalação
-Copie esta pasta para `~/.claude/skills/conselho-dos-ancioes/`. Requer Node 18+ e os CLIs dos anciões que você usar (`claude` e `agy` no par padrão). **Sem outras dependências**: a skill é autossuficiente.
+---
 
-## Uso
-```
+## 1. A Visão dos 2 Agentes Rivais (`Jedy` ⚔️ `Sith`)
+
+| Frente | Agente (`agents/`) | Filosofia & Lente de Julgamento | Pergunta Central |
+|---|---|---|---|
+| **Polo da Ordem (Tese)** | **Jedy** (`agents/jedy-ordem.md`) | Arquitetura limpa (SOLID/Clean Code), resiliência, contratos formais (RFC 7807), segurança estrutural (AppSec/LGPD), governança e sustentabilidade de 6 a 12 meses. | *"O que vai quebrar, vazar, gerar passivo ou destruir o projeto no longo prazo se cedermos à pressa imprudente?"* |
+| **Polo da Ruptura (Antítese)** | **Sith** (`agents/sith-ruptura.md`) | Velocidade brutal de execução, alavancagem assimétrica, corte radical de escopo (Pareto 90/10), anti-burocracia, anti-overengineering e tração imediata. | *"Qual premissa fraca ou burocracia está travando o resultado hoje, o que cortamos pela metade agora e onde está a alavancagem máxima?"* |
+
+### Fluxo do Debate Dialético (Sem o Orquestrador à Frente)
+1. **Abertura (Tese vs. Antítese):** **Jedy** ataca riscos estruturais, segurança e dívida técnica; **Sith** ataca lentidão, gordura de escopo e complexidade desnecessária.
+2. **Rebate Direto:** **Sith** desmonta onde a cautela de **Jedy** vira burocracia; **Jedy** bloqueia onde o atalho de **Sith** cria risco fatal.
+3. **Veredito Dual para Decisão Humana:** Entrega os pontos de **Convergência Rara** (onde até Jedy e Sith concordam = ação imediata) e a **Divergência Irredutível** (o trade-off real entre fundação vs. velocidade para decisão soberana do usuário).
+
+---
+
+## 2. Instalação
+
+1. Copie esta pasta para `~/.claude/skills/conselho-dos-ancioes/`.
+2. **(Opcional / Recomendado) Ative os 2 Agentes Rivais:**
+   - No **Claude Code**: copie `agents/jedy-ordem.md` e `agents/sith-ruptura.md` para `~/.claude/agents/` (ou `.claude/agents/` do seu repositório).
+   - No **OpenBot / Sistema Multiagente**: crie os agentes **Jedy** e **Sith** usando os prompts de `agents/jedy-ordem.md` e `agents/sith-ruptura.md` e vincule esta skill a ambos.
+3. Requer **Node 18+** e os CLIs dos anciões que você usar (`claude` e `agy` no par padrão). **Zero dependências externas npm**: a skill é 100% autossuficiente.
+
+---
+
+## 3. Uso do Motor CLI (`conselho.mjs`)
+
+```bash
+# Debate com Lentes Rivais (--rival): 1º ancião assume Ordem/Jedy e 2º assume Ruptura/Sith
+node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --arquivo plano.md --pedido "pedido original"
+
+# Revisão de diff de código com Lentes Rivais
+node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --rev HEAD --contexto "1 frase sobre a mudança"
+
+# Revisão técnica neutra (padrão clássico ou forçando --modo neutro)
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rev HEAD --contexto "1 frase"
-node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --arquivo plano.md --pedido "pedido original"
+
+# Usando modelos e lentes personalizados via JSON
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --arquivo plano.md --pedido "..." --revisores meus-modelos.json
 ```
 
-## Outros modelos
-`--revisores arquivo.json` (ou a variável `CONSELHO_REVISORES`) substitui o par padrão. Cada ancião é um comando, sem shell (o prompt nunca é interpretado):
+---
+
+## 4. Outros Modelos e Lentes Customizadas (`--revisores`)
+
+`--revisores arquivo.json` (ou a variável `CONSELHO_REVISORES`) substitui o par padrão. Cada ancião é um comando executado sem shell (o prompt nunca é interpretado) e aceita o campo opcional `"lente"` (`"ordem"`, `"ruptura"`, `"jedy"`, `"sith"` ou qualquer lente customizada):
+
 ```json
 [
-  { "nome": "alfa", "cmd": "meu-cli", "args": ["--sem-ferramentas"], "entrada": "stdin", "maxChars": 100000, "removerEnv": ["MINHA_CHAVE"] },
-  { "nome": "beta", "cmd": "outro-cli", "args": ["--print", "{prompt}"], "entrada": "arg", "maxChars": 24000 }
+  {
+    "nome": "jedy-opus",
+    "lente": "ordem",
+    "cmd": "claude",
+    "args": ["-p", "--model", "claude-opus-5-5", "--tools", ""],
+    "entrada": "stdin",
+    "maxChars": 200000,
+    "removerEnv": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+  },
+  {
+    "nome": "sith-gemini",
+    "lente": "ruptura",
+    "cmd": "gemini",
+    "args": ["-m", "gemini-4-hydrogen", "--skip-trust", "--approval-mode", "plan", "-p", "Responda ao conteudo recebido por stdin."],
+    "entrada": "stdin",
+    "maxChars": 100000,
+    "removerEnv": ["GEMINI_FREE_KEY", "GEMINI_PAID_KEY", "GOOGLE_API_KEY"],
+    "definirEnv": { "GEMINI_API_KEY": "GEMINI_FREE_KEY" }
+  }
 ]
 ```
-`revisores.exemplo.json` traz pontos de partida (Claude e Gemini CLI **testados**; Codex e Ollama **não testados**, confira os argumentos no `--help` do seu CLI). `definirEnv` copia uma variável do seu ambiente para outra do ancião (ex.: `GEMINI_API_KEY` a partir de `GEMINI_FREE_KEY`; só nomes, nunca valores). No Windows, CLIs do npm (shim `.cmd`) funcionam com `entrada: "stdin"`. O CLI deve responder só com texto, sem ferramentas, terminando com `VEREDITO: APROVA | APROVA COM RESSALVAS | REPROVA`.
 
-## Segurança
+`revisores.exemplo.json` traz configurações prontas (Claude e Gemini CLI **testados**; Codex e Ollama **não testados**). No Windows, CLIs do npm (shim `.cmd`) funcionam com `entrada: "stdin"`. Todo CLI deve responder só com texto, sem ferramentas, terminando com `VEREDITO: APROVA | APROVA COM RESSALVAS | REPROVA`.
+
+---
+
+## 5. Segurança
 - Arquivos sensíveis (`.env`, chaves) e lockfiles ficam fora do diff; patch com arquivo sensível é recusado.
 - Lista de bloqueio própria: variável `CONSELHO_CAMINHOS_BLOQUEADOS` (regexes separadas por `;`) ou `~/.claude/conselho.bloqueios.json`.
-- Segredos e dados pessoais são redigidos; chave privada aborta. `removerEnv` tira chaves do ambiente de cada ancião (o Opus roda sem `ANTHROPIC_API_KEY`, salvo `--permitir-api`).
-- O material vai entre marcadores aleatórios, tratado como dado. Artefato exige `--pedido`.
-- O material sai da máquina (os anciões são serviços externos). O filtro é por nome e por padrão de texto e não pega tudo. Não use com dados sensíveis; em dúvida, `--dry-run`.
+- Segredos e dados pessoais (CPF, CNPJ, e-mail, tokens) são redigidos; chave privada aborta a execução (exit 3). `removerEnv` isola chaves do ambiente de cada ancião (o Opus roda pelo plano sem `ANTHROPIC_API_KEY`, salvo `--permitir-api`).
+- O material vai entre delimitadores com sufixo aleatório (`<<<MATERIAL-nonce`), tratado estritamente como dado contra *prompt injection*. Artefato exige `--pedido`.
+- Código de saída: `0` todos deram parecer válido, `5` só parte, `6` nenhum, `2/3/4` bloqueio antes de enviar.
 
-Código de saída: 0 todos deram parecer válido, 5 só parte, 6 nenhum, 2/3/4 bloqueio antes de enviar. Veja `SKILL.md` para todas as opções, regras e o formato da síntese.
+---
 
-## Testes
-```
+## 6. Testes
+```bash
 cd scripts && node --test
 ```
-Não gastam cota: os "modelos" dos testes são processos `node`.
+Não gastam cota de IA: os "modelos" dos testes são processos `node` locais.
 
 ## Créditos
-Baseado na skill de Danilo Gato ([@odanilogato](https://github.com/odanilogato), cpdf.ai); reescrito e adaptado por Gabriel Coutinho. Licença: MIT.
+Baseado na skill original de Danilo Gato ([@odanilogato](https://github.com/odanilogato), cpdf.ai); evoluído para Arquitetura de 2 Agentes Rivais (`Jedy` vs. `Sith`) e motor CLI multi-modelo por Gabriel Coutinho. Licença: MIT.

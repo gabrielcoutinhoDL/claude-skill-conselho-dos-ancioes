@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { main, carregarRevisores, envDoAnciao } from './conselho.mjs';
+import { main, carregarRevisores, envDoAnciao, resolverLente, buildPrompt, parseArgs } from './conselho.mjs';
 import { sanitize, checkFilePath, carregarCaminhosBloqueados, semVariaveis, runCli, killTree, resolverComando } from './lib.mjs';
 
 async function capturar(fn) {
@@ -19,7 +19,6 @@ async function capturar(fn) {
 }
 
 const NODE = process.execPath;
-// "Modelos" falsos, 100% portáveis (rodam com o próprio node): leem o prompt e respondem no formato do conselho.
 const LE_STDIN = "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>{";
 const ECO_STDIN = `${LE_STDIN}console.log('1. [BAIXA] x - y\\nVEREDITO: '+(b.includes('<<<MATERIAL-')?'APROVA':'REPROVA'))})`;
 const ECO_ARG = "const p=process.argv[1]||'';console.log('1. [MÉDIA] a - b\\nVEREDITO: '+(p.includes('<<<MATERIAL-')?'REPROVA':'APROVA'))";
@@ -64,7 +63,7 @@ test('lib.runCli: stdin, arg com {prompt}, metacaracteres sem shell, comando ine
   const b = await runCli({ cmd: NODE, args: ['-e', ECO_ARG, '{prompt}'], entrada: 'arg', prompt: 'sem marcador', timeoutMs: 20000 });
   assert.equal(b.code, 0); assert.match(b.out, /VEREDITO: APROVA/);
   const c = await runCli({ cmd: NODE, args: ['-e', "console.log(process.argv[1])", '{prompt}'], entrada: 'arg', prompt: '"; echo PWNED & calc', timeoutMs: 20000 });
-  assert.equal(c.out.trim(), '"; echo PWNED & calc'); // o prompt chega como texto, nunca interpretado
+  assert.equal(c.out.trim(), '"; echo PWNED & calc');
   const d = await runCli({ cmd: 'comando-que-nao-existe-xyz', args: [], prompt: 'x', timeoutMs: 20000 });
   assert.equal(d.code, 127);
   const t0 = Date.now();
@@ -115,6 +114,38 @@ test('carregarRevisores: rejeita configs inválidas', () => {
   finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+test('lentes rivais (Jedy/Ordem vs. Sith/Ruptura): resolverLente, parseArgs, buildPrompt e carregarRevisores', () => {
+  assert.equal(resolverLente(undefined), null);
+  assert.equal(resolverLente('neutra'), null);
+  assert.equal(resolverLente('ordem').rotulo, 'Ordem/Jedy');
+  assert.equal(resolverLente('JEDY').chave, 'ordem');
+  assert.equal(resolverLente('ruptura').rotulo, 'Ruptura/Sith');
+  assert.equal(resolverLente('Sith').chave, 'ruptura');
+  assert.equal(resolverLente('Foco em FinOps e margem').chave, 'custom');
+
+  assert.equal(parseArgs(['--rival']).rival, true);
+  assert.equal(parseArgs(['--modo', 'rival']).modo, 'rival');
+  assert.equal(parseArgs(['--modo', 'neutro']).rival, false);
+  assert.throws(() => parseArgs(['--modo', 'caos']), /--modo deve ser rival ou neutro/);
+
+  const pOrdem = buildPrompt({ tipo: 'artefato', material: 'plano X', pedido: 'meta Y', lente: 'ordem' });
+  assert.match(pOrdem, /LENTE RIVAL DE JULGAMENTO — POLO DA ORDEM/);
+  const pRuptura = buildPrompt({ tipo: 'diff', material: '+a', lente: 'sith' });
+  assert.match(pRuptura, /LENTE RIVAL DE JULGAMENTO — POLO DA RUPTURA/);
+
+  const cValido = config([{ nome: 'jedy', cmd: 'claude', lente: 'ordem' }, { nome: 'sith', cmd: 'agy', lente: 'ruptura' }]);
+  try {
+    const r = carregarRevisores(cValido.f);
+    assert.equal(r[0].lente, 'ordem');
+    assert.equal(r[1].lente, 'ruptura');
+  } finally { cValido.limpar(); }
+
+  for (const ruim of ['', '   ', 123]) {
+    const cRuim = config([{ nome: 'jedy', cmd: 'claude', lente: ruim }]);
+    try { assert.throws(() => carregarRevisores(cRuim.f), /lente deve ser string/); } finally { cRuim.limpar(); }
+  }
+});
+
 const SEM_LOG = { logCall: () => {} };
 const ARGS = ['--texto', 'material de teste', '--pedido', 'p'];
 
@@ -126,9 +157,9 @@ test('e2e: 3 "modelos" quaisquer (stdin, arg e um que quebra) via --revisores, s
   ]);
   try {
     const c = await capturar(() => main([...ARGS, '--revisores', f], {}, SEM_LOG));
-    assert.equal(c.r, 5); // 2 de 3 deram parecer válido
+    assert.equal(c.r, 5);
     assert.match(c.out, /ANCIÃO: alfa/); assert.match(c.out, /ANCIÃO: beta/); assert.match(c.out, /ANCIÃO: gama/);
-    assert.match(c.out, /alfa -> VEREDITO: APROVA/); assert.match(c.out, /beta -> VEREDITO: REPROVA/); // o prompt chega com o delimitador
+    assert.match(c.out, /alfa -> VEREDITO: APROVA/); assert.match(c.out, /beta -> VEREDITO: REPROVA/);
     assert.match(c.out, /FALHOU: código 1/); assert.match(c.out, /parecer parcial/);
 
     const so = await capturar(() => main([...ARGS, '--revisores', f, '--only', 'ALFA'], {}, SEM_LOG));
@@ -158,6 +189,34 @@ test('e2e: todos concordam = IGUAIS; teto vem do menor maxChars; chave do ambien
     const teto = await capturar(() => main([...ARGS, '--revisores', f, '--max-chars', '9000', '--dry-run'], {}, SEM_LOG));
     assert.equal(teto.r, 2); assert.match(teto.err, /teto de 5000 \(limite de dois\)/);
     const so1 = await capturar(() => main([...ARGS, '--revisores', f, '--max-chars', '9000', '--only', 'um', '--dry-run'], {}, SEM_LOG));
-    assert.equal(so1.r, 0); // só o "um" (teto 24000): 9000 cabe
+    assert.equal(so1.r, 0);
   } finally { limpar(); }
+});
+
+test('e2e --rival e --modo neutro: injeta lentes opostas (Ordem/Jedy vs. Ruptura/Sith) nos anciões', async () => {
+  const ecoLente = "let b='';process.stdin.on('data',x=>b+=x).on('end',()=>{const l=b.includes('POLO DA ORDEM')?'ORDEM':b.includes('POLO DA RUPTURA')?'RUPTURA':'NEUTRA';console.log('LENTE_RECEBIDA='+l+'\\nVEREDITO: APROVA')})";
+  const { f, limpar } = config([
+    { nome: 'jedy', cmd: NODE, args: ['-e', ecoLente] },
+    { nome: 'sith', cmd: NODE, args: ['-e', ecoLente] },
+  ]);
+  try {
+    const cRival = await capturar(() => main([...ARGS, '--revisores', f, '--rival'], {}, SEM_LOG));
+    assert.equal(cRival.r, 0);
+    assert.match(cRival.out, /ANCIÃO: jedy .* \[LENTE: Ordem\/Jedy\]/);
+    assert.match(cRival.out, /ANCIÃO: sith .* \[LENTE: Ruptura\/Sith\]/);
+    assert.match(cRival.out, /LENTE_RECEBIDA=ORDEM/);
+    assert.match(cRival.out, /LENTE_RECEBIDA=RUPTURA/);
+
+    const soSith = await capturar(() => main([...ARGS, '--revisores', f, '--rival', '--only', 'sith'], {}, SEM_LOG));
+    assert.equal(soSith.r, 0);
+    assert.match(soSith.out, /LENTE_RECEBIDA=RUPTURA/);
+  } finally { limpar(); }
+
+  const cFixo = config([{ nome: 'jedy', cmd: NODE, args: ['-e', ecoLente], lente: 'ordem' }]);
+  try {
+    const cNeutro = await capturar(() => main([...ARGS, '--revisores', cFixo.f, '--modo', 'neutro'], {}, SEM_LOG));
+    assert.equal(cNeutro.r, 0);
+    assert.match(cNeutro.out, /LENTE_RECEBIDA=NEUTRA/);
+    assert.ok(!cNeutro.out.includes('[LENTE:'));
+  } finally { cFixo.limpar(); }
 });
