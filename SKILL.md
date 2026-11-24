@@ -1,22 +1,24 @@
 ---
 name: conselho-dos-ancioes
 description: >
-  Conselho dos Anciões v2.0.0: arquitetura de debate dialético entre 2 Agentes Rivais entre si
+  Conselho dos Anciões v2.1.0: arquitetura de debate dialético entre 2 Agentes Rivais entre si
   (Jedy — Polo da Ordem, Resiliência, Segurança e Longo Prazo vs. Sith — Polo da Ruptura, Velocidade,
   Assimetria e Corte Radical 90/10, operando sem o agente orquestrador à frente do Conselho) combinada
-  com revisão multi-modelo via CLI (Opus 5.5 + Gemini 4 Argon ou outros modelos com --rival e --revisores).
-  Inclui templates prontos dos 2 agentes rivais em agents/ e motor CLI com lentes antagônicas.
+  com revisão multi-modelo via CLI (Opus 5.5 + Gemini 4 Argon ou outros modelos com --rival e --revisores)
+  e Prova Red -> Green executável (--exigir-falha-base) contra falsos verdes em segurança.
   Use em todo planejamento estratégico, decisão de arquitetura, escopo de sprint, proposta comercial
   ou mudança de risco (auth, schema, contrato de API, segurança, LGPD, deploy).
-author: Baseado na skill de Danilo Gato (@odanilogato, cpdf.ai); evoluída por Gabriel Coutinho para Arquitetura de 2 Agentes Rivais (Jedy vs. Sith)
-version: 2.0.0
+author: Baseado na skill de Danilo Gato (@odanilogato, cpdf.ai); evoluída por Gabriel Coutinho para Debate Dual Jedy vs. Sith e Prova Red -> Green (ADR-012 / ADR-026 / ADR-030)
+version: 2.1.0
 ---
 
-# Conselho dos Anciões v2.0 — Arquitetura de 2 Agentes Rivais (`Jedy` ⚔️ `Sith`) & Motor Multi-Modelo
+# Conselho dos Anciões v2.1 — 2 Agentes Rivais (`Jedy` ⚔️ `Sith`), Motor Multi-Modelo & Prova Red → Green
 
-O erro clássico de qualquer orquestração de IA é deixar o mesmo agente que planejou (ou o orquestrador principal) presidir a revisão do próprio plano. Na **v2.0.0**, o Conselho dos Anciões passa a operar com **dois agentes rivais entre si — Jedy e Sith — sem o orquestrador à frente do Conselho**, além de injetar **lentes antagônicas** diretamente no motor CLI multi-modelo (`scripts/conselho.mjs --rival`).
+O erro clássico de qualquer orquestração de IA tem duas camadas:
+1. **Ponto cego cognitivo:** deixar o mesmo modelo que escreveu (ou o orquestrador principal) presidir a revisão do próprio trabalho.
+2. **Ponto cego estático:** aprovar um `diff` de segurança porque ele contém um teste "verde", sem notar que o teste é **tautológico** (já passaria mesmo sem a correção).
 
-O valor nasce da colisão: onde **Ordem (Tese)** e **Ruptura (Antítese)** colidem em modelos de famílias diferentes (**Claude Opus + Gemini Argon**).
+Na **v2.1.0**, o Conselho dos Anciões une **dois agentes rivais entre si (`Jedy` vs. `Sith`, sem o orquestrador à frente)** + **motor CLI multi-modelo (`--rival`)** + **Prova Red → Green executável (`--exigir-falha-base`)**, que roda o teste novo em worktrees descartáveis contra o commit base (exigindo falha comprovada) e contra o código corrigido (exigindo aprovação) antes mesmo de enviar o diff aos anciões.
 
 ---
 
@@ -55,6 +57,7 @@ Sempre que um plano, projeto, escopo de sprint, arquitetura ou estratégia preci
 
 ## 3. Quando Usar
 - **Sim:** Todo planejamento de projeto, estratégia de produto/negócio, definição de escopo de sprint, arquitetura, além de mudanças de risco (auth/autorização, schema de banco, contrato de API, segurança, LGPD, checklist de deploy, decisão financeira).
+- **Em diffs de segurança (auth, RBAC/IDOR/RLS, segredos, certificados, logs/PII):** rode **sempre** com `--exigir-falha-base --teste-cmd "..."` para impedir falsos verdes.
 - **Não:** Ajuste trivial de formatação ou qualquer envio ao script externo `conselho.mjs` contendo dado sensível (ver regras de segurança abaixo).
 
 ---
@@ -74,13 +77,20 @@ Sempre que um plano, projeto, escopo de sprint, arquitetura ou estratégia preci
 # Modo Rival (--rival): 1º ancião julga com a lente Ordem/Jedy e 2º ancião com a lente Ruptura/Sith
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --arquivo plano.md --pedido "pedido original"
 
-# Revisão de diff de código com lentes rivais
-node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --rev HEAD --contexto "1 frase"
+# Revisão de diff de segurança com Prova Red -> Green obrigatória (--exigir-falha-base)
+node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --rev HEAD \
+  --exigir-falha-base --teste-cmd "pytest -q tests/test_auth.py" --contexto "bloqueia acesso IDOR"
 
 # Modo Neutro (padrão clássico sem lentes rivais, ou forçando --modo neutro)
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rev HEAD --contexto "1 frase"
 ```
 
+- **Prova Red → Green (`--exigir-falha-base` + `--teste-cmd "<comando>"`):**
+  - Cria dois `git worktree` descartáveis fora do repositório (zero alteração na sua árvore de trabalho):
+    1. **RED:** código de produção no commit base (`--base-rev`, ou base automática de `--rev` / `HEAD`) + apenas os arquivos de teste adicionados/alterados no alvo (`--teste-arquivo` ou detecção automática). Exige que o teste **falhe** (`exit != 0`). Se passar, bloqueia imediatamente com **exit 7 (`FALSO VERDE`)** sem gastar cota de LLM.
+    2. **GREEN:** código completo corrigido no alvo. Exige que o mesmo teste **passe** (`exit 0`). Se falhar, bloqueia com **exit 7**.
+  - Quando Red falha e Green passa, anexa o resumo sanitizado da execução (`=== PROVA RED -> GREEN EXECUTADA ===`) ao material para que os anciões confirmem se a falha na base veio realmente da brecha/regra corrigida (e não de `ImportError`/sintaxe).
+  - Se um `diff` tocar termos de segurança (`auth`, `jwt`, `token`, `idor`, `rls`, `certificado`, `pii`, `webhook`, etc.) sem `--exigir-falha-base`, o script emite `AVISO` sugerindo ativar a trava.
 - **Lentes Rivais (`--rival` ou `--modo rival|neutro`):**
   - Com `--rival` (ou `--modo rival`), o motor injeta automaticamente a lente **Polo da Ordem (`Ordem/Jedy`)** no 1º ancião e **Polo da Ruptura (`Ruptura/Sith`)** no 2º ancião (ou usa a propriedade `"lente"` definida em cada item de `--revisores`).
   - Com `--modo neutro`, qualquer lente configurada é desativada para uma revisão técnica neutra.
@@ -88,8 +98,8 @@ node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rev HEAD --con
 - **Artefato (Plano, Estratégia, Proposta, Spec):** `--arquivo a.md` (repetível) e/ou `--texto "..."` + **sempre** o pedido original: `--pedido "..."`, `--criterio "..."` ou `--pedido-arquivo f.txt`.
 - **Artefato sem pedido é bloqueado** (exit 2); `--sem-pedido` força.
 - **Diff:** lockfiles e arquivos sensíveis ficam fora e aparecem como `AVISO`. Arquivos novos não rastreados ficam fora (aviso); `--incluir-novos` os inclui (até 100 KB cada).
-- **Opções:** `--rival`, `--modo rival|neutro`, `--revisores arquivo.json`, `--only nome`, `--permitir-api`, `--incluir-novos`, `--sem-pedido`, `--max-chars N`, `--effort low|medium|high` (Argon, padrão medium), `--claude-model id` (padrão `claude-opus-5-5`), `--timeout seg` (mín. 300, com aviso se subir), `--dry-run`.
-- **Código de saída:** 0 = todos deram parecer válido; 5 = só parte (resposta sem veredito conta como falha); 6 = nenhum; 2/3/4 = bloqueio antes de enviar (entrada, segredo, teto).
+- **Opções:** `--rival`, `--modo rival|neutro`, `--exigir-falha-base`, `--teste-cmd "..."`, `--base-rev REV`, `--teste-arquivo REL`, `--revisores arquivo.json`, `--only nome`, `--permitir-api`, `--incluir-novos`, `--sem-pedido`, `--max-chars N`, `--effort low|medium|high` (Argon, padrão medium), `--claude-model id` (padrão `claude-opus-5-5`), `--timeout seg` (mín. 300, com aviso se subir), `--dry-run`.
+- **Código de saída:** `0` = todos deram parecer válido; `5` = só parte (resposta sem veredito conta como falha); `6` = nenhum; `2/3/4` = bloqueio antes de enviar (entrada, segredo, teto); `7` = bloqueio na Prova Red → Green (sem teste, falso verde na base ou falha no alvo).
 - O material vai entre marcadores aleatórios e o ancião é instruído a tratá-lo como dado, não como ordem. Cada ponto deve citar trecho do material.
 - Os anciões rodam em pasta vazia, sem ferramentas (Opus `--tools ""`; Argon `--mode plan`) e só veem o prompt. Leva ~20 a 60 s. No timeout o processo e os filhos são encerrados (`taskkill /T /F` no Windows).
 - Log só de metadados em `~/.claude/logs/conselho.jsonl` (nunca o conteúdo).

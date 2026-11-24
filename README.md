@@ -1,8 +1,10 @@
-# Conselho dos Anciões v2.0 — 2 Agentes Rivais (`Jedy` ⚔️ `Sith`) & Revisão Multi-Modelo
+# Conselho dos Anciões v2.1 — 2 Agentes Rivais (`Jedy` ⚔️ `Sith`), Multi-Modelo & Prova Red → Green
 
-Segunda opinião adversarial e debate estratégico para **Claude Code**, **OpenBot** e arquiteturas multiagente.
+Segunda opinião adversarial, debate estratégico e trava contra falsos verdes em segurança para **Claude Code**, **OpenBot** e arquiteturas multiagente.
 
-Na **v2.0.0**, o Conselho dos Anciões traz a arquitetura de **2 Agentes Rivais entre si (`Jedy` vs. `Sith`)**: em vez de deixar o agente orquestrador (ou o próprio autor do plano) presidir a revisão e sofrer de viés de confirmação, você instancia **duas frentes diametralmente opostas** que assumem o controle do Conselho e debatem qualquer plano, arquitetura, escopo ou diff de código — apoiadas pelo motor CLI multi-modelo (`scripts/conselho.mjs --rival`) que confronta **Claude Opus** + **Gemini Argon** (ou qualquer CLI configurado em `--revisores`).
+Na **v2.1.0**, o Conselho dos Anciões combina:
+1. **2 Agentes Rivais entre si (`Jedy` vs. `Sith`):** sem o agente orquestrador à frente do Conselho, confrontando **Claude Opus** + **Gemini Argon** (ou qualquer CLI em `--revisores`) com `--rival`.
+2. **Prova Red → Green executável (`--exigir-falha-base`):** em diffs de segurança, roda o teste novo em *worktrees* descartáveis contra o commit base (exigindo falha comprovada = **Red**) e contra o código corrigido (exigindo aprovação = **Green**), bloqueando testes tautológicos (`exit 7`) antes de gastar cota de LLM e anexando a evidência real aos anciões.
 
 ---
 
@@ -36,8 +38,9 @@ Na **v2.0.0**, o Conselho dos Anciões traz a arquitetura de **2 Agentes Rivais 
 # Debate com Lentes Rivais (--rival): 1º ancião assume Ordem/Jedy e 2º assume Ruptura/Sith
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --arquivo plano.md --pedido "pedido original"
 
-# Revisão de diff de código com Lentes Rivais
-node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --rev HEAD --contexto "1 frase sobre a mudança"
+# Revisão de diff de segurança com Prova Red -> Green (--exigir-falha-base)
+node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival --rev HEAD \
+  --exigir-falha-base --teste-cmd "pytest -q tests/test_auth.py" --contexto "bloqueia acesso IDOR"
 
 # Revisão técnica neutra (padrão clássico ou forçando --modo neutro)
 node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rev HEAD --contexto "1 frase"
@@ -80,12 +83,13 @@ node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --arquivo plano.
 
 ---
 
-## 5. Segurança
+## 5. Segurança & Prova Red → Green
+- **Prova Red → Green (`--exigir-falha-base --teste-cmd "..."`):** executa o comando de teste sem shell arbitrário em `git worktree` temporário sobre o commit base (com apenas os arquivos de teste do alvo) e depois sobre o alvo completo. Bloqueia com `exit 7` se não houver teste, se o teste já passar na base (*falso verde*) ou se falhar no alvo.
 - Arquivos sensíveis (`.env`, chaves) e lockfiles ficam fora do diff; patch com arquivo sensível é recusado.
 - Lista de bloqueio própria: variável `CONSELHO_CAMINHOS_BLOQUEADOS` (regexes separadas por `;`) ou `~/.claude/conselho.bloqueios.json`.
 - Segredos e dados pessoais (CPF, CNPJ, e-mail, tokens) são redigidos; chave privada aborta a execução (exit 3). `removerEnv` isola chaves do ambiente de cada ancião (o Opus roda pelo plano sem `ANTHROPIC_API_KEY`, salvo `--permitir-api`).
 - O material vai entre delimitadores com sufixo aleatório (`<<<MATERIAL-nonce`), tratado estritamente como dado contra *prompt injection*. Artefato exige `--pedido`.
-- Código de saída: `0` todos deram parecer válido, `5` só parte, `6` nenhum, `2/3/4` bloqueio antes de enviar.
+- Código de saída: `0` todos deram parecer válido, `5` só parte, `6` nenhum, `2/3/4` bloqueio (entrada/segredo/teto), `7` bloqueio na Prova Red → Green.
 
 ---
 
@@ -96,4 +100,4 @@ cd scripts && node --test
 Não gastam cota de IA: os "modelos" dos testes são processos `node` locais.
 
 ## Créditos
-Baseado na skill original de Danilo Gato ([@odanilogato](https://github.com/odanilogato), cpdf.ai); evoluído para Arquitetura de 2 Agentes Rivais (`Jedy` vs. `Sith`) e motor CLI multi-modelo por Gabriel Coutinho. Licença: MIT.
+Baseado na skill original de Danilo Gato ([@odanilogato](https://github.com/odanilogato), cpdf.ai); evoluído para Arquitetura de 2 Agentes Rivais (`Jedy` vs. `Sith`), motor CLI multi-modelo e Prova Red → Green por Gabriel Coutinho. Licença: MIT.

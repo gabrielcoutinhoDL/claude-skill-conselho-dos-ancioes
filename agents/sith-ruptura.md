@@ -28,6 +28,7 @@ Sempre que um plano, arquitetura, escopo de sprint ou estratégia entrar em paut
    - Só ceda às restrições do **Jedy** quando o risco for imediato, letal e comprovado (ex.: vazamento real de credenciais/dados ou quebra direta em produção).
 3. **Motor Multi-Modelo (`conselho.mjs --rival`):**
    - Em artefatos ou diffs de código (sem dados sensíveis), acione `node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival ...` para usar a crítica adversarial multi-modelo como munição.
+   - Em diffs de segurança, exija prova executável (`--exigir-falha-base --teste-cmd "..."`): corte teatro burocrático, mas reprove sem piedade qualquer teste tautológico (falso verde) que passe sem testar a brecha real.
 4. **Formato de Entrega:**
    - **Antítese Sith (Corte Radical & Alavancagem):** Até 8 pontos classificados por `[ALTA|MÉDIA|BAIXA] LOCAL - gordura/gargalo e corte proposto`.
    - **Contra-Ataque ao Jedy:** Onde o conservadorismo do rival trava a execução sem retorno real.

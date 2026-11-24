@@ -3,7 +3,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { basename, resolve, join } from 'node:path';
+import { basename, resolve, join, delimiter } from 'node:path';
 
 // Arquivos que nunca vão a nenhum ancião.
 const BLOCKED_NAME = /(^|[\\/])(\.env(\..*)?|.*\.(pem|key|p12|pfx|keystore|jks)|id_(rsa|ed25519|ecdsa)|credentials(\.json)?|secrets?\.(json|ya?ml))$/i;
@@ -84,9 +84,9 @@ export function sanitize(text, extraValues = []) {
   return { text: out, counts, fatal, redactions: Object.values(counts).reduce((a, b) => a + b, 0) };
 }
 
-/** Encerra o processo e os filhos (no Windows, child.kill() não derruba a árvore). */
+/** Encerra o processo e os filhos (no Windows o .kill() só mata o pai e deixa netos vivos). */
 export function killTree(child, plat = process.platform, run = spawnSync) {
-  if (!child.pid) return;
+  if (!child || !child.pid) return;
   if (plat === 'win32') run('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
   else { try { child.kill('SIGKILL'); } catch { /* já saiu */ } }
 }
@@ -117,6 +117,88 @@ export function resolverComando(cmd, plat = process.platform, run = spawnSync) {
 // Em shim .cmd o comando passa pelo cmd.exe: só caracteres inofensivos nos argumentos (o prompt nunca vai na linha de comando).
 const ARG_SHIM = /^[\w@.:=,+\/\\ -]*$/;
 const aspas = (x) => (/[ ]/.test(x) ? `"${x}"` : x);
+
+/**
+ * Tokeniza um comando de teste simples (ex.: `pytest -q "tests/meu teste.py"`) sem usar shell.
+ * Recusa metacaracteres de encadeamento/redirecionamento (`; & | < > ` $ ( ) \r \n`).
+ */
+export function dividirComando(linha) {
+  if (typeof linha !== 'string' || !linha.trim()) throw new Error('comando de teste vazio');
+  if (/[;&|<>`$()\r\n]/.test(linha)) {
+    throw new Error('comando de teste inválido: metacaracteres de shell (; & | < > ` $ ( )) não são permitidos');
+  }
+  const tokens = [];
+  let atual = '', aspa = '';
+  for (let i = 0; i < linha.length; i++) {
+    const ch = linha[i];
+    if (aspa) {
+      if (ch === aspa) aspa = '';
+      else atual += ch;
+    } else if (ch === '"' || ch === "'") {
+      aspa = ch;
+    } else if (/\s/.test(ch)) {
+      if (atual) { tokens.push(atual); atual = ''; }
+    } else {
+      atual += ch;
+    }
+  }
+  if (aspa) throw new Error('comando de teste inválido: aspas não fechadas');
+  if (atual) tokens.push(atual);
+  if (!tokens.length) throw new Error('comando de teste vazio');
+  return { cmd: tokens[0], args: tokens.slice(1) };
+}
+
+/** Enriquecimento de PATH e NODE_PATH para worktrees descartáveis acharem venv/node_modules do repositório original. */
+export function envComRepo(env, topo) {
+  const e = { ...env };
+  // Evita que `node --test` filho herde contexto IPC de um `node --test` pai e mascare código de saída != 0.
+  delete e.NODE_TEST_CONTEXT;
+  const candidatos = [
+    join(topo, 'node_modules', '.bin'),
+    join(topo, '.venv', 'Scripts'),
+    join(topo, 'venv', 'Scripts'),
+    join(topo, '.venv', 'bin'),
+    join(topo, 'venv', 'bin'),
+  ].filter((p) => existsSync(p));
+  if (candidatos.length) {
+    const chavePath = Object.keys(e).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+    e[chavePath] = [...candidatos, e[chavePath] || ''].filter(Boolean).join(delimiter);
+  }
+  const nm = join(topo, 'node_modules');
+  if (existsSync(nm)) e.NODE_PATH = e.NODE_PATH ? `${nm}${delimiter}${e.NODE_PATH}` : nm;
+  return e;
+}
+
+/**
+ * Executa um comando local (ex.: suíte de testes na prova Red -> Green) num diretório específico, sem shell arbitrário.
+ * Resolve sempre { code, out, err, timedOut }; nunca rejeita.
+ */
+export function runLocal({ cmd, args = [], cwd, timeoutMs = 120_000, env = process.env, plat = process.platform, run = spawnSync }) {
+  const { file, shim } = resolverComando(cmd, plat, run);
+  return new Promise((res) => {
+    let child;
+    let out = '', err = '', timedOut = false, fim = false, guarda;
+    const done = (code) => {
+      if (fim) return;
+      fim = true; clearTimeout(t); clearTimeout(guarda);
+      res({ code, out, err, timedOut });
+    };
+    const t = setTimeout(() => { timedOut = true; if (child) killTree(child); guarda = setTimeout(() => done(124), 10_000); }, timeoutMs);
+    if (shim && args.some((x) => !ARG_SHIM.test(x))) {
+      err = `${cmd} é um shim .cmd do Windows: argumentos aceitam apenas letras, números e . : = , + / \\ -`;
+      return done(127);
+    }
+    try {
+      child = shim
+        ? spawn(`"${file}" ${args.map(aspas).join(' ')}`, { cwd, env, shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
+        : spawn(file, args, { cwd, env, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) { err = String(e); return done(127); }
+    child.stdout.on('data', (c) => (out += c));
+    child.stderr.on('data', (c) => (err += c));
+    child.on('error', (e) => { err += String(e); done(127); });
+    child.on('close', done);
+  });
+}
 
 /**
  * Roda um CLI de IA em pasta temporária vazia (sem shell, salvo shim .cmd do Windows com entrada stdin).

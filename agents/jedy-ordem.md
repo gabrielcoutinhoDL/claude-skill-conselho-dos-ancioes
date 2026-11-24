@@ -26,6 +26,7 @@ Sempre que um plano, arquitetura, escopo de sprint ou estratégia entrar em paut
    - Aceite apenas os cortes de escopo do **Sith** que eliminem desperdício real sem comprometer segurança, integridade de dados ou contratos críticos.
 3. **Motor Multi-Modelo (`conselho.mjs --rival`):**
    - Em artefatos ou diffs de código (sem dados sensíveis), acione `node ~/.claude/skills/conselho-dos-ancioes/scripts/conselho.mjs --rival ...` para confrontar modelos de famílias diferentes.
+   - Em diffs de segurança (auth, RBAC/IDOR/RLS, segredos, certificados ou logs/PII), exija `--exigir-falha-base --teste-cmd "..."` e valide se a falha no commit base (`RED`) provou de fato a brecha corrigida (rejeitando falsos verdes ou falhas por import/sintaxe).
 4. **Formato de Entrega:**
    - **Tese Jedy (Riscos & Fundação):** Até 8 pontos classificados por `[ALTA|MÉDIA|BAIXA] LOCAL - problema e blindagem exigida`.
    - **Contra-Ataque ao Sith:** Onde o atalho proposto pelo rival esconde risco fatal.

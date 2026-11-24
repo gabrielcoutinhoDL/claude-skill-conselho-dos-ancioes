@@ -1,22 +1,19 @@
 #!/usr/bin/env node
-// Conselho dos Anciões — revisão independente por dois ou mais modelos de famílias diferentes via CLI.
-// Suporta modo de Agentes Rivais (--rival / --modo rival ou campo "lente" em --revisores):
-//   - Polo da Ordem (Jedy / Tese): resiliência, arquitetura limpa, segurança (AppSec/LGPD) e longo prazo.
-//   - Polo da Ruptura (Sith / Antítese): velocidade brutal, corte radical de escopo (90/10) e assimetria.
+// Conselho dos Anciões v2.1 — revisão independente por dois ou mais modelos de famílias diferentes via CLI.
+// Suporta:
+//   - Agentes Rivais (--rival / --modo rival ou campo "lente" em --revisores): Ordem/Jedy vs. Ruptura/Sith.
+//   - Prova Red -> Green (--exigir-falha-base --teste-cmd "..."): roda o teste novo em worktrees descartáveis
+//     contra o commit base (exigindo falha real = Red) e contra o código corrigido (exigindo aprovação = Green),
+//     bloqueando falsos verdes (exit 7) antes de gastar cota de LLM e anexando a evidência sanitizada ao prompt.
 // Padrão: Claude Opus (claude -p, plano) + Gemini Argon (agy --mode plan). Outros modelos: --revisores arquivo.json.
-// Uso: node conselho.mjs [--rev RANGE | --diff-file PATH | --arquivo PATH... | --texto STR]
-//        [--pedido STR | --pedido-arquivo PATH] [--contexto STR] [--repo DIR]
-//        [--revisores ARQUIVO.json] [--only NOME] [--rival | --modo rival|neutro]
-//        [--effort low|medium|high] [--claude-model ID] [--max-chars N] [--timeout SEG] [--dry-run]
-//        [--permitir-api] [--incluir-novos] [--sem-pedido]
-// Saída: 0 = todos os anciões deram parecer válido; 5 = só parte; 6 = nenhum; 2/3/4 = bloqueio antes de enviar.
+// Saída: 0 = todos os anciões deram parecer válido; 5 = só parte; 6 = nenhum; 2/3/4 = bloqueio (entrada/segredo/teto); 7 = bloqueio Red->Green.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, basename, resolve, relative, isAbsolute } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, basename, dirname, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { sanitize, checkFilePath, runCli, semVariaveis } from './lib.mjs';
+import { sanitize, checkFilePath, runCli, runLocal, dividirComando, envComRepo, semVariaveis } from './lib.mjs';
 
 export { killTree } from './lib.mjs';
 
@@ -25,6 +22,9 @@ const TETO_ARGON = 24_000; // agy só aceita o prompt inline (~28K, limite de li
 const TETO_OPUS = 200_000;
 const MIN_TIMEOUT_S = 300;
 const NOME_ANCIAO = /^[A-Za-z0-9_-]{1,24}$/;
+const REV_SEGURO = /^[\w.^~@{}\/-]+$/;
+const ARQUIVO_TESTE_RE = /(^|[\\/])(tests?|__tests__|specs?)[\\/]|(\.|_)(test|spec)\.[a-z0-9]+$|(^|[\\/])test_[^\\/]+\.py$/i;
+const SUPERFICIE_SENSIVEL_RE = /\b(auth|autentic|autoriz|jwt|token|login|senha|password|passwd|secret|credencia|rbac|abac|idor|rls|permiss|certificado|sanitize|redact|lgpd|pii|webhook|csrf|cors|hmac|signature|crypto|cipher)\b/i;
 
 export const LENTES_RIVAIS = {
   ordem: 'POLO DA ORDEM, RESILIÊNCIA E LONGO PRAZO (TESE / JEDY): Julgue sob a ótica de arquitetura limpa (SOLID/Clean Code), segurança estrutural (AppSec/LGPD), contratos formais, estabilidade, dívida técnica e sustentabilidade de longo prazo. Pergunta central: O que vai quebrar, vazar, gerar passivo ou destruir o projeto em 6 a 12 meses se cedermos à pressa imprudente?',
@@ -42,8 +42,20 @@ export function resolverLente(lente) {
   return { chave: 'custom', rotulo: limpo.slice(0, 32), texto: limpo };
 }
 
+export function ehArquivoDeTeste(caminho) {
+  return ARQUIVO_TESTE_RE.test(String(caminho));
+}
+
+export function tocaSuperficieSensivel(diffText) {
+  return SUPERFICIE_SENSIVEL_RE.test(String(diffText));
+}
+
 export function parseArgs(argv) {
-  const a = { files: [], effort: 'medium', claudeModel: process.env.CONSELHO_CLAUDE_MODEL || 'claude-opus-5-5', timeoutS: 900, repo: process.cwd(), maxChars: MAX_CHARS };
+  const a = {
+    files: [], testeArquivos: [], effort: 'medium',
+    claudeModel: process.env.CONSELHO_CLAUDE_MODEL || 'claude-opus-5-5',
+    timeoutS: 900, repo: process.cwd(), maxChars: MAX_CHARS,
+  };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const next = () => { if (i + 1 >= argv.length) throw new Error(`falta valor para ${k}`); return argv[++i]; };
@@ -64,6 +76,10 @@ export function parseArgs(argv) {
       a.modo = m;
       a.rival = m === 'rival';
     }
+    else if (k === '--exigir-falha-base') a.exigirFalhaBase = true;
+    else if (k === '--teste-cmd') a.testeCmd = next();
+    else if (k === '--base-rev') a.baseRev = next();
+    else if (k === '--teste-arquivo') a.testeArquivos.push(next());
     else if (k === '--effort') a.effort = next();
     else if (k === '--claude-model') a.claudeModel = next();
     else if (k === '--max-chars') { a.maxChars = Number(next()); a.maxCharsExplicito = true; }
@@ -77,7 +93,20 @@ export function parseArgs(argv) {
   if (a.only && !NOME_ANCIAO.test(a.only)) throw new Error('--only inválido (use o nome de um ancião: letras, números, _ ou -)');
   if (!['low', 'medium', 'high'].includes(a.effort)) throw new Error('--effort deve ser low, medium ou high');
   if (!/^[a-z0-9][a-z0-9.-]{0,60}$/.test(a.claudeModel)) throw new Error('--claude-model inválido');
-  if (a.rev && (a.rev.startsWith('-') || !/^[\w.^~@{}\/-]+$/.test(a.rev))) throw new Error('--rev inválido');
+  if (a.rev && (a.rev.startsWith('-') || !REV_SEGURO.test(a.rev))) throw new Error('--rev inválido');
+  if (a.baseRev && (a.baseRev.startsWith('-') || !REV_SEGURO.test(a.baseRev))) throw new Error('--base-rev inválido');
+  for (const tf of a.testeArquivos) {
+    if (!tf.trim() || isAbsolute(tf) || tf.split(/[\\/]/).includes('..')) {
+      throw new Error('--teste-arquivo deve ser caminho relativo dentro do repositório (sem ..)');
+    }
+  }
+  if (a.exigirFalhaBase) {
+    if (!a.testeCmd) throw new Error('--exigir-falha-base exige --teste-cmd "<comando>"');
+    dividirComando(a.testeCmd);
+    if (a.files.length || a.texto || a.diffFile) {
+      throw new Error('--exigir-falha-base exige diff de repositório git (incompatível com --arquivo, --texto ou --diff-file)');
+    }
+  }
   if (!Number.isFinite(a.maxChars) || a.maxChars <= 0) throw new Error('--max-chars inválido');
   if (!Number.isFinite(a.timeoutS) || a.timeoutS < MIN_TIMEOUT_S) { a.timeoutS = MIN_TIMEOUT_S; a.timeoutRaised = true; }
   return a;
@@ -94,7 +123,7 @@ const LOCKFILE = /(^|[\\/])(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry
 const MAX_NOVO_BYTES = 100_000;
 
 /** O material vai entre marcadores com sufixo aleatório; instruções dentro dele não valem. */
-export function buildPrompt({ tipo, material, contexto, pedido, lente, nonce = randomBytes(6).toString('hex') }) {
+export function buildPrompt({ tipo, material, contexto, pedido, lente, provaRedGreen, nonce = randomBytes(6).toString('hex') }) {
   const ctx = contexto || '(não informado)';
   const ini = `<<<MATERIAL-${nonce}`;
   const fim = `MATERIAL-${nonce}>>>`;
@@ -102,15 +131,19 @@ export function buildPrompt({ tipo, material, contexto, pedido, lente, nonce = r
   const infoLente = resolverLente(lente);
   const blocoLente = infoLente ? `\nLENTE RIVAL DE JULGAMENTO — ${infoLente.texto}` : '';
   if (tipo === 'diff') {
+    const instrRg = provaRedGreen
+      ? '\nPROVA RED -> GREEN ANEXADA: Confira no final do material a saída real do teste na base (RED) e no código corrigido (GREEN). Reprove se a falha na base tiver ocorrido apenas por erro de sintaxe, import inexistente ou mock quebrado em vez da brecha/regra de negócio real.'
+      : '';
+    const corpo = provaRedGreen ? `${material}\n\n${provaRedGreen}` : material;
     return `Você é um ancião revisor. Revise SOMENTE o diff abaixo. Não explore o repositório, não rode comandos, não use ferramentas.
-${aviso}${blocoLente}
+${aviso}${blocoLente}${instrRg}
 Contexto da mudança: ${ctx}
 Procure bugs, regressões, falhas de segurança e casos de borda que o diff introduz ou deixa passar.
 ${FORMATO.replace('LOCAL', 'arquivo:linha')}
 
 DIFF:
 ${ini}
-${material}
+${corpo}
 ${fim}`;
   }
   return `Você é um ancião revisor. Revise SOMENTE o material abaixo. Não explore nada fora dele, não rode comandos, não use ferramentas.
@@ -156,6 +189,18 @@ export function gruposDeNomes(tokens) {
     i += dois ? 3 : 2;
   }
   return g;
+}
+
+/** Pares { status, antigo?, atual } a partir de `git ... --name-status -z`. */
+function itensMudados(tokens) {
+  const res = [];
+  for (let i = 0; i < tokens.length;) {
+    const st = tokens[i];
+    const dois = /^[RC]/.test(st);
+    res.push(dois ? { status: st[0], antigo: tokens[i + 1], atual: tokens[i + 2] } : { status: st[0], atual: tokens[i + 1] });
+    i += dois ? 3 : 2;
+  }
+  return res;
 }
 
 /** Motivo para NÃO enviar o arquivo aos anciões ('' se liberado). */
@@ -250,6 +295,180 @@ export function collect(a) {
   return { tipo: 'diff', material, avisos };
 }
 
+function recortarSaida(r, max = 700) {
+  const bruto = [r.out, r.err].map((s) => String(s || '').trim()).filter(Boolean).join('\n');
+  if (!bruto) return '(sem saída)';
+  return bruto.length > max ? `...${bruto.slice(-max)}` : bruto;
+}
+
+/**
+ * Executa a Prova Red -> Green em worktrees descartáveis fora do repositório:
+ *  1. RED: código de produção em `baseSha` + apenas os arquivos de teste do alvo -> deve FALHAR (code != 0).
+ *  2. GREEN: código completo do alvo -> deve PASSAR (code === 0).
+ * Nunca altera arquivos no repositório original.
+ */
+export async function executarProvaRedGreen(a, env = process.env, deps = {}) {
+  const { runTest = runLocal } = deps;
+  let topo, baseSha, alvoSha = null;
+  try {
+    topo = resolve(git(a.repo, ['rev-parse', '--show-toplevel']).trim());
+    let baseSpec, alvoSpec = null;
+    if (a.rev) {
+      if (a.rev.includes('...')) {
+        const [esq, dir] = a.rev.split('...');
+        alvoSpec = dir || 'HEAD';
+        baseSpec = a.baseRev || git(topo, ['merge-base', esq || 'HEAD', alvoSpec]).trim();
+      } else if (a.rev.includes('..')) {
+        const [esq, dir] = a.rev.split('..');
+        alvoSpec = dir || 'HEAD';
+        baseSpec = a.baseRev || esq || 'HEAD~1';
+      } else {
+        alvoSpec = a.rev;
+        baseSpec = a.baseRev || `${a.rev}~1`;
+      }
+      alvoSha = git(topo, ['rev-parse', '--verify', `${alvoSpec}^{commit}`]).trim();
+    } else {
+      baseSpec = a.baseRev || 'HEAD';
+    }
+    baseSha = git(topo, ['rev-parse', '--verify', `${baseSpec}^{commit}`]).trim();
+  } catch (e) {
+    return { ok: false, code: 2, erro: `erro (--exigir-falha-base): não foi possível resolver commit base/alvo (${e.message})` };
+  }
+
+  const norm = (p) => p.replace(/\\/g, '/');
+  let arquivosTeste = [];
+  if (a.testeArquivos && a.testeArquivos.length > 0) {
+    for (const tf of a.testeArquivos) {
+      const rel = norm(tf);
+      const motivo = motivoExcluir(topo, rel);
+      if (motivo) return { ok: false, code: 2, erro: `erro (--exigir-falha-base): --teste-arquivo recusado (${motivo})` };
+      const existe = alvoSha
+        ? spawnSync('git', ['-C', topo, 'cat-file', '-e', `${alvoSha}:${rel}`]).status === 0
+        : existsSync(join(topo, rel));
+      if (!existe) return { ok: false, code: 2, erro: `erro (--exigir-falha-base): arquivo de teste não encontrado no alvo: ${rel}` };
+      arquivosTeste.push(rel);
+    }
+  } else {
+    const tokens = lista(git(topo, alvoSha
+      ? ['diff', '--name-status', '-z', `${baseSha}..${alvoSha}`]
+      : ['diff', '--name-status', '-z', baseSha]));
+    const candidatos = itensMudados(tokens)
+      .filter((x) => x.status !== 'D')
+      .map((x) => norm(x.atual));
+    if (!alvoSha && a.incluirNovos) {
+      for (const u of lista(git(topo, ['ls-files', '--others', '--exclude-standard', '--full-name', '-z']))) candidatos.push(norm(u));
+    }
+    arquivosTeste = [...new Set(candidatos)].filter((f) => !motivoExcluir(topo, f) && ehArquivoDeTeste(f));
+  }
+
+  if (!arquivosTeste.length) {
+    return {
+      ok: false,
+      code: 7,
+      erro: 'bloqueado (--exigir-falha-base): nenhum arquivo de teste adicionado ou alterado no diff (adicione um teste de regressão ou informe --teste-arquivo).',
+    };
+  }
+
+  const lerBlobAlvo = (rel) => {
+    if (alvoSha) {
+      const r = spawnSync('git', ['-C', topo, 'show', `${alvoSha}:${rel}`], { maxBuffer: 16 * 1024 * 1024 });
+      if (r.status !== 0) throw new Error(`falha ao ler ${rel} em ${alvoSha.slice(0, 7)}`);
+      return r.stdout;
+    }
+    return readFileSync(join(topo, rel));
+  };
+
+  const { cmd, args } = dividirComando(a.testeCmd);
+  const timeoutMs = Math.min(a.timeoutS || 300, 120) * 1000;
+  const envTeste = envComRepo(env, topo);
+  const raizTmp = mkdtempSync(join(tmpdir(), 'conselho-rg-'));
+  const wtBase = join(raizTmp, 'base');
+  const wtAlvo = join(raizTmp, 'alvo');
+
+  try {
+    git(topo, ['worktree', 'add', '--detach', wtBase, baseSha]);
+    for (const rel of arquivosTeste) {
+      const dest = join(wtBase, rel);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, lerBlobAlvo(rel));
+    }
+    const red = await runTest({ cmd, args, cwd: wtBase, timeoutMs, env: envTeste });
+    if (red.timedOut) return { ok: false, code: 2, erro: 'erro (--exigir-falha-base): timeout ao rodar o teste no commit base.' };
+    if (red.code === 127) {
+      return { ok: false, code: 2, erro: `erro (--exigir-falha-base): falha ao iniciar comando de teste (${recortarSaida(red, 200)})` };
+    }
+    if (red.code === 0) {
+      return {
+        ok: false,
+        code: 7,
+        erro: `bloqueado (--exigir-falha-base): FALSO VERDE — o teste já PASSA no commit base (${baseSha.slice(0, 7)}) sem a correção! Ele não prova a brecha/bug.`,
+      };
+    }
+
+    if (alvoSha) {
+      git(topo, ['worktree', 'add', '--detach', wtAlvo, alvoSha]);
+    } else {
+      const headSha = git(topo, ['rev-parse', '--verify', 'HEAD^{commit}']).trim();
+      git(topo, ['worktree', 'add', '--detach', wtAlvo, headSha]);
+      const mudadosWT = itensMudados(lista(git(topo, ['diff', '--name-status', '-z', 'HEAD'])));
+      for (const m of mudadosWT) {
+        if (m.antigo && m.status === 'R') {
+          try { rmSync(join(wtAlvo, m.antigo), { force: true }); } catch { /* ok */ }
+        }
+        if (m.status === 'D') {
+          try { rmSync(join(wtAlvo, m.atual), { force: true }); } catch { /* ok */ }
+        } else if (!motivoExcluir(topo, m.atual) && existsSync(join(topo, m.atual))) {
+          const dest = join(wtAlvo, m.atual);
+          mkdirSync(dirname(dest), { recursive: true });
+          writeFileSync(dest, readFileSync(join(topo, m.atual)));
+        }
+      }
+      const extrasWT = new Set(arquivosTeste);
+      if (a.incluirNovos) {
+        for (const u of lista(git(topo, ['ls-files', '--others', '--exclude-standard', '--full-name', '-z']))) {
+          if (!motivoExcluir(topo, u)) extrasWT.add(norm(u));
+        }
+      }
+      for (const rel of extrasWT) {
+        if (existsSync(join(topo, rel))) {
+          const dest = join(wtAlvo, rel);
+          mkdirSync(dirname(dest), { recursive: true });
+          writeFileSync(dest, readFileSync(join(topo, rel)));
+        }
+      }
+    }
+
+    const green = await runTest({ cmd, args, cwd: wtAlvo, timeoutMs, env: envTeste });
+    if (green.timedOut || green.code !== 0) {
+      return {
+        ok: false,
+        code: 7,
+        erro: `bloqueado (--exigir-falha-base): o teste falhou na base (código ${red.code}), mas CONTINUA FALHANDO no código corrigido (${green.timedOut ? 'timeout' : `código ${green.code}`}): ${recortarSaida(green, 300)}`,
+      };
+    }
+
+    const baseCurto = baseSha.slice(0, 7);
+    const alvoRotulo = alvoSha ? alvoSha.slice(0, 7) : 'working-tree';
+    const resumo = [
+      '=== PROVA RED -> GREEN EXECUTADA (--exigir-falha-base) ===',
+      `Comando: ${a.testeCmd}`,
+      `Arquivos de teste aplicados sobre a base: ${arquivosTeste.join(', ')}`,
+      `1. RED (código base ${baseCurto} + teste novo): FALHOU como esperado (código ${red.code})`,
+      recortarSaida(red, 700),
+      `2. GREEN (código corrigido ${alvoRotulo} + teste novo): PASSOU (código 0)`,
+      recortarSaida(green, 500),
+    ].join('\n');
+
+    return { ok: true, baseSha: baseCurto, alvoRotulo, arquivosTeste, redCode: red.code, resumo };
+  } finally {
+    for (const wt of [wtBase, wtAlvo]) {
+      spawnSync('git', ['-C', topo, 'worktree', 'remove', '--force', wt], { stdio: 'ignore' });
+    }
+    spawnSync('git', ['-C', topo, 'worktree', 'prune'], { stdio: 'ignore' });
+    try { rmSync(raizTmp, { recursive: true, force: true }); } catch { /* ok */ }
+  }
+}
+
 /** Anciões padrão: Opus (claude, plano) e Argon (agy). */
 export function revisoresPadrao(a) {
   const modeloArgon = `gemini-4-argon-${a.effort}`;
@@ -280,10 +499,10 @@ export function carregarRevisores(arquivo) {
   if (!existsSync(arquivo)) throw new Error(`--revisores: arquivo não existe: ${arquivo}`);
   let j;
   try { j = JSON.parse(readFileSync(arquivo, 'utf8')); } catch (e) { throw new Error(`--revisores: JSON inválido (${e.message})`); }
-  const lista = Array.isArray(j) ? j : j && j.revisores;
-  if (!Array.isArray(lista) || lista.length === 0) throw new Error('--revisores: esperado um array com pelo menos um ancião');
+  const listaRev = Array.isArray(j) ? j : j && j.revisores;
+  if (!Array.isArray(listaRev) || listaRev.length === 0) throw new Error('--revisores: esperado um array com pelo menos um ancião');
   const vistos = new Set();
-  return lista.map((r, i) => {
+  return listaRev.map((r, i) => {
     const onde = `--revisores[${i}]`;
     if (!r || typeof r !== 'object') throw new Error(`${onde}: objeto esperado`);
     if (typeof r.nome !== 'string' || !NOME_ANCIAO.test(r.nome)) throw new Error(`${onde}: nome inválido (letras, números, _ ou -, até 24)`);
@@ -330,7 +549,7 @@ function logCall(e) {
   try { mkdirSync(join(homedir(), '.claude', 'logs'), { recursive: true }); appendFileSync(join(homedir(), '.claude', 'logs', 'conselho.jsonl'), JSON.stringify(e) + '\n'); } catch { /* opcional */ }
 }
 
-/** deps (para teste): { run(rev, prompt, timeoutMs, env), logCall }. Padrão = os reais. */
+/** deps (para teste): { run(rev, prompt, timeoutMs, env), runTest, logCall }. Padrão = os reais. */
 export async function main(argv, env = process.env, deps = {}) {
   const { run = executar, logCall: lg = logCall } = deps;
   let a;
@@ -370,6 +589,17 @@ export async function main(argv, env = process.env, deps = {}) {
   if (input.tipo === 'artefato' && !a.pedido && !a.semPedido) {
     console.error('erro: artefato exige --pedido/--criterio/--pedido-arquivo (sem o pedido original os modelos gastam cota julgando às cegas). Use --sem-pedido para forçar.');
     return 2;
+  }
+
+  let redGreenOk = false;
+  if (a.exigirFalhaBase) {
+    const rg = await executarProvaRedGreen(a, env, deps);
+    if (!rg.ok) { console.error(rg.erro); return rg.code; }
+    input.provaRedGreen = rg.resumo;
+    redGreenOk = true;
+    console.error(`[conselho] prova Red -> Green OK: falhou em ${rg.baseSha} (exit ${rg.redCode}) e passou em ${rg.alvoRotulo} (exit 0)`);
+  } else if (input.tipo === 'diff' && tocaSuperficieSensivel(input.material)) {
+    console.error('AVISO: diff toca superfície de segurança/auth/logs; considere --exigir-falha-base --teste-cmd "<comando>" para impedir falso verde.');
   }
 
   const nomesChaves = new Set(['GEMINI_FREE_KEY', 'GEMINI_PAID_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', ...revisores.flatMap((r) => r.removerEnv)]);
@@ -419,7 +649,7 @@ export async function main(argv, env = process.env, deps = {}) {
     console.log(`===== ANCIÃO: ${r.nome} (${r.modelo})${tagLente} =====`);
     if (ok) { process.stdout.write(sanitize(r.out, ownKeys).text.trim() + '\n\n'); verdicts[r.nome] = veredito; }
     else console.log(`FALHOU: ${r.timedOut ? 'timeout' : `código ${r.code}`}. ${sanitize(r.err || r.out, ownKeys).text.slice(0, 500)}\n`);
-    lg({ ts: new Date().toISOString(), ancião: r.nome, modelo: r.modelo, lente: r.infoLente?.chave || 'neutra', tipo: input.tipo, inChars: maiorLen, outChars: r.out.length, code: r.code, timedOut: r.timedOut, ok });
+    lg({ ts: new Date().toISOString(), ancião: r.nome, modelo: r.modelo, lente: r.infoLente?.chave || 'neutra', tipo: input.tipo, redGreen: redGreenOk, inChars: maiorLen, outChars: r.out.length, code: r.code, timedOut: r.timedOut, ok });
   }
   console.log('===== PARA A SÍNTESE =====');
   for (const [n, v] of Object.entries(verdicts)) console.log(`${n} -> ${v ? `VEREDITO: ${v}` : '(sem veredito)'}`);
